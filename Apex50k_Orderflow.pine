@@ -162,9 +162,9 @@ plotshape(fireBuyT2,  "BUY ar2", shape.arrowup, location.belowbar, color.new(col
 plotshape(fireSellT2, "SELL", shape.labeldown, location.abovebar, color.new(color.fuchsia, 0), text = "SELL", textcolor = color.white, size = size.large)
 plotshape(fireSellT2, "SELL ar2", shape.arrowdown, location.abovebar, color.new(color.red, 30), size = size.normal)
 
-// Tier 3 (B): standard triangle
-plotshape(fireBuyT3,  "buy",  shape.triangleup,   location.belowbar, color.new(color.aqua,    0), size = size.small)
-plotshape(fireSellT3, "sell", shape.triangledown, location.abovebar, color.new(color.maroon,  0), size = size.small)
+// Tier 3 (B): bigger marker with subtle text so it's visible at any zoom
+plotshape(fireBuyT3,  "buy B",  shape.labelup,   location.belowbar, color.new(color.aqua,    0), text = "b", textcolor = color.black, size = size.normal)
+plotshape(fireSellT3, "sell B", shape.labeldown, location.abovebar, color.new(color.maroon,  0), text = "s", textcolor = color.white, size = size.normal)
 
 // Background flash on signal bars - dramatic visual cue
 bgcolor(fireBuyT1  ? color.new(color.green, 70)   : na, title = "BUY A+ flash")
