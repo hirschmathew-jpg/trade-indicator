@@ -29,6 +29,9 @@ skipLastMin = input.int(15,    "Skip Last N Min",      minval = 0, group = gFilt
 useVolReg   = input.bool(true, "Volatility Regime Filter", group = gFilt)
 atrMin      = input.float(0.3, "ATR Floor (vs avg)",   minval = 0.1, step = 0.05, group = gFilt)
 atrMax      = input.float(3.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gFilt)
+useVwapSlope= input.bool(true, "Require VWAP Slope in Trade Direction", group = gFilt)
+slopeBars   = input.int(10,    "VWAP Slope Lookback Bars", minval = 3, group = gFilt)
+slopeMin    = input.float(0.05, "VWAP Slope Min (ATR fraction)", minval = 0.01, step = 0.01, group = gFilt)
 
 gSig      = "Signal Tweaks"
 brkMinRng = input.float(0.3,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
@@ -210,8 +213,14 @@ vetoShort  = not useVwap or belowVwap
 htfOKLong  = not useHTFBias or htfBull
 htfOKShort = not useHTFBias or htfBear
 
-allFiltersLong  = goodTime and volOK and vetoLong  and htfOKLong
-allFiltersShort = goodTime and volOK and vetoShort and htfOKShort
+vwapSlope    = vwap - vwap[slopeBars]
+slopeUp      = vwapSlope >  atr * slopeMin
+slopeDown    = vwapSlope < -atr * slopeMin
+slopeOKLong  = not useVwapSlope or slopeUp
+slopeOKShort = not useVwapSlope or slopeDown
+
+allFiltersLong  = goodTime and volOK and vetoLong  and htfOKLong  and slopeOKLong
+allFiltersShort = goodTime and volOK and vetoShort and htfOKShort and slopeOKShort
 
 rawLong  = allowLong  and inSess and not flatNow and triggerLong  and allFiltersLong
 rawShort = allowShort and inSess and not flatNow and triggerShort and allFiltersShort

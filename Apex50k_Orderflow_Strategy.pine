@@ -59,6 +59,9 @@ skipLastMin = input.int(15,    "Skip Last N Min before Close", minval = 0, group
 useVolReg   = input.bool(true, "Volatility Regime Filter", group = gFilt)
 atrMin      = input.float(0.3, "ATR Floor (vs 50-bar avg)",  minval = 0.1, step = 0.05, group = gFilt)
 atrMax      = input.float(3.0, "ATR Ceiling (vs 50-bar avg)", minval = 1.0, step = 0.1, group = gFilt)
+useVwapSlope= input.bool(true, "Require VWAP Slope in Trade Direction", group = gFilt, tooltip = "Long only when VWAP is sloping up; short only when sloping down. Skips choppy flat sessions where breakouts fail.")
+slopeBars   = input.int(10,    "VWAP Slope Lookback Bars", minval = 3, maxval = 30, group = gFilt)
+slopeMin    = input.float(0.05, "VWAP Slope Min (ATR fraction)", minval = 0.01, step = 0.01, group = gFilt, tooltip = "Slope as fraction of ATR. 0.05 = VWAP must change by 0.05*ATR over slopeBars to count as sloped.")
 
 gSig      = "Signal Tweaks"
 brkMinRng = input.float(0.3,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
@@ -105,8 +108,9 @@ maxDailyLoss  = input.float(800.0,  "Max Daily Loss ($)",        minval = 50, gr
 useCushionHalt= input.bool(true,    "Halt on Low Cushion",       group = gProt)
 trailCushion  = input.float(500.0,  "Halt Cushion ($)",          minval = 0, group = gProt)
 useScaleDown  = input.bool(true,    "Scale Down Size at 2x Cushion", group = gProt)
-useIntraTrail = input.bool(true,    "Intraday Peak Trail Halt",  group = gProt, tooltip = "Halt new entries AND close any open trade if today's equity drops by Intraday Trail \$ from today's peak. Stops 'giving back' winning days.")
-intraTrail    = input.float(400.0,  "Intraday Peak Trail ($)",   minval = 50, group = gProt, tooltip = "Max acceptable drawdown from today's peak equity before halting. \$400 default = stops a winning day from turning into a losing day.")
+useIntraTrail = input.bool(true,    "Intraday Peak Trail Halt",  group = gProt, tooltip = "Halt new entries when today's equity drops by Intraday Trail \$ from today's peak.")
+intraTrail    = input.float(400.0,  "Intraday Peak Trail ($)",   minval = 50, group = gProt)
+intraCloseOpen= input.bool(false,   "Close Open Trade on IntraTrail Halt", group = gProt, tooltip = "When ON, force-closes any open position when intraday-trail breaches. When OFF (default), only blocks new entries and lets the open trade hit its natural stop. OFF generally produces better backtest results but ON is safer for the Apex trail.")
 
 // ============================== POINT VALUE ==================================
 dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
@@ -254,8 +258,15 @@ vetoShort = not useVwap or belowVwap
 htfOKLong  = not useHTFBias or htfBull
 htfOKShort = not useHTFBias or htfBear
 
-allFiltersLong  = goodTime and volOK and vetoLong  and htfOKLong
-allFiltersShort = goodTime and volOK and vetoShort and htfOKShort
+// VWAP slope filter - skip flat sessions where breakouts don't have follow-through.
+vwapSlope    = vwap - vwap[slopeBars]
+slopeUp      = vwapSlope >  atr * slopeMin
+slopeDown    = vwapSlope < -atr * slopeMin
+slopeOKLong  = not useVwapSlope or slopeUp
+slopeOKShort = not useVwapSlope or slopeDown
+
+allFiltersLong  = goodTime and volOK and vetoLong  and htfOKLong  and slopeOKLong
+allFiltersShort = goodTime and volOK and vetoShort and htfOKShort and slopeOKShort
 
 rawLong  = allowLong  and inSess and not flatNow and triggerLong  and allFiltersLong
 rawShort = allowShort and inSess and not flatNow and triggerShort and allFiltersShort
@@ -290,8 +301,8 @@ cushionHalt  = useCushionHalt and cushion <  trailCushion
 intraHalt    = useIntraTrail  and intraDD >= intraTrail
 canTrade     = not dailyHalt and not cushionHalt and not intraHalt
 
-// CLOSE the open position when intraday-trail breaches (gives back gains).
-if intraHalt and strategy.position_size != 0
+// Optionally close the open position when intraday-trail breaches.
+if intraHalt and intraCloseOpen and strategy.position_size != 0
     strategy.close_all(comment = "IntraTrail halt")
 
 sizeScale = useScaleDown and cushion < trailCushion * 2.0 ? 0.5 : 1.0
