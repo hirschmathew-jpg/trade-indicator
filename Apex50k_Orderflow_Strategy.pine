@@ -45,8 +45,9 @@ strictBias  = input.bool(false, "Strict Bias (HARD veto)", group = grpSess, tool
 flatBy      = input.session("1555-1600", "Force-Flat Window (NY)", group = grpSess)
 
 grpScore    = "Confluence Scoring"
-minScore    = input.int(2, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore, tooltip = "Lower = more trades. Try 2 for active trading, 4 for high-conviction only.")
-cooldownBars= input.int(2, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
+minScore    = input.int(2, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore, tooltip = "Lower = more trades. Try 2 for active, 4 for high-conviction.")
+cooldownBars= input.int(5, "Bars Cooldown Between Signals", minval = 0, group = grpScore, tooltip = "Bars to wait after a signal before another can fire on the same direction.")
+requireOF   = input.bool(true, "Require Orderflow Point (recommended)", group = grpScore, tooltip = "When ON, requires at least one of: stacked imbalance, absorption, large delta, or CVD rising. Without this the strategy fires on pure price-position alignment which spams signals.")
 
 grpRisk     = "SL / TP Engine"
 slMode      = input.string("ATR + Swing", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = grpRisk)
@@ -227,8 +228,12 @@ shortScore += brokeORLo         ? 1 : 0
 longOK  = not strictBias or ((not useVwapF or aboveVwap) and (not useORBias or orBiasUp))
 shortOK = not strictBias or ((not useVwapF or belowVwap) and (not useORBias or orBiasDn))
 
-rawLong  = inSession and orReady and longOK  and longScore  >= minScore
-rawShort = inSession and orReady and shortOK and shortScore >= minScore
+// Real orderflow evidence (NOT just price-vs-VWAP/OR alignment).
+ofLong  = stackedBuy  or absorbBuy  or deltaPct >  0.20 or cvdUp
+ofShort = stackedSell or absorbSell or deltaPct < -0.20 or cvdDn
+
+rawLong  = inSession and orReady and longOK  and longScore  >= minScore and (not requireOF or ofLong)
+rawShort = inSession and orReady and shortOK and shortScore >= minScore and (not requireOF or ofShort)
 
 // Cooldown - prevents back-to-back signals after a trade closes.
 var int lastSig = -1000
@@ -360,8 +365,13 @@ plot(inSession ? orL  : na, "OR Low",       color = color.new(color.aqua,    0),
 plot(inSession ? orMid: na, "OR Mid",       color = color.new(color.gray,   30), style = plot.style_linebr)
 plotshape(rawLong  and strategy.position_size == 0, "OF LONG",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.small)
 plotshape(rawShort and strategy.position_size == 0, "OF SHORT", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.small)
-plotchar(showScore and inSession and orReady ? longScore  : na, "LongScore",  str.tostring(longScore),  location.belowbar, color = color.new(color.green, 30), size = size.tiny)
-plotchar(showScore and inSession and orReady ? shortScore : na, "ShortScore", str.tostring(shortScore), location.abovebar, color = color.new(color.red,   30), size = size.tiny)
+// Score "dots" - one constant char per threshold. Filled circle = high conviction.
+plotchar(showScore and inSession and orReady and longScore  >= 1, "L>=1", "·", location.belowbar, color = color.new(color.green, 50), size = size.tiny)
+plotchar(showScore and inSession and orReady and longScore  >= 2, "L>=2", "•", location.belowbar, color = color.new(color.green, 30), size = size.tiny)
+plotchar(showScore and inSession and orReady and longScore  >= 4, "L>=4", "●", location.belowbar, color = color.new(color.green,  0), size = size.tiny)
+plotchar(showScore and inSession and orReady and shortScore >= 1, "S>=1", "·", location.abovebar, color = color.new(color.red,   50), size = size.tiny)
+plotchar(showScore and inSession and orReady and shortScore >= 2, "S>=2", "•", location.abovebar, color = color.new(color.red,   30), size = size.tiny)
+plotchar(showScore and inSession and orReady and shortScore >= 4, "S>=4", "●", location.abovebar, color = color.new(color.red,    0), size = size.tiny)
 bgcolor(inSession ? na : color.new(color.gray, 92), title = "Outside Session")
 
 // Diagnostics table - tells you WHY you're not getting trades.
