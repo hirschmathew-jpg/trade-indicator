@@ -87,7 +87,7 @@ grpApex     = "Apex 50k Risk"
 acctStart   = input.float(50000.0, "Starting Balance ($)", group = grpApex)
 trailDD     = input.float(2000.0,  "Trailing Drawdown ($)", group = grpApex)
 ddLockProf  = input.float(2100.0,  "Trailing Lock Profit ($)", group = grpApex, tooltip = "Apex locks the trail at start+$2,100 = $52,100 net (Static 50k PA variant).")
-riskPerTrade= input.float(250.0,   "Max $ Risk / Trade", minval = 25.0, group = grpApex)
+riskPerTrade= input.float(400.0,   "Max $ Risk / Trade", minval = 25.0, group = grpApex, tooltip = "Conservative=$250 (8 losses to blow). Standard=$400 (5 losses). Aggressive=$500 (4 losses). Trail is $2,000.")
 sym         = input.string("MNQ", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = grpApex)
 maxContracts= input.int(20, "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = grpApex)
 

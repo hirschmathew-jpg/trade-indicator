@@ -85,7 +85,7 @@ beAfterTP1  = input.bool(true, "Move SL to Break-Even after TP1", group = grpRis
 grpApex     = "Apex 50k Risk"
 trailDD     = input.float(2000.0, "Trailing Drawdown ($)", group = grpApex)
 ddLockProf  = input.float(2100.0, "Trailing Lock Profit ($)", group = grpApex)
-riskPerTrade= input.float(250.0,  "Max $ Risk / Trade", minval = 25.0, group = grpApex)
+riskPerTrade= input.float(400.0,  "Max $ Risk / Trade", minval = 25.0, group = grpApex, tooltip = "Conservative=$250. Standard=$400. Aggressive=$500. Trail is $2,000.")
 sym         = input.string("MNQ", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = grpApex)
 maxContracts= input.int(20, "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = grpApex)
 stopOnDD    = input.bool(true, "Halt Trading if Trail-DD Breached", group = grpApex)
