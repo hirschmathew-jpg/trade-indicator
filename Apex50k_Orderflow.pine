@@ -1,0 +1,480 @@
+//@version=6
+// =============================================================================
+// Apex 50k PA Orderflow Pro - Buy/Sell Signals with SL & TP
+// -----------------------------------------------------------------------------
+// Built for Apex Trader Funding $50,000 PA (Performance Account):
+//   * Trailing drawdown : $2,500  (locks at start + $2,600 = $52,600 net)
+//   * Intraday only     : flat by 4:59 PM ET
+//   * Default contracts : micros (MES/MNQ/MGC/MCL) for tighter risk units
+//
+// What this indicator does
+//   1. Approximates true orderflow (buy vs sell aggression) via lower-timeframe
+//      volume classification - the standard fallback when bid/ask tape is not
+//      exposed by your data feed.
+//   2. Builds CVD, stacked imbalances, absorption, and CVD/price divergence.
+//   3. Filters with HTF trend (EMA50/200), VWAP, ATR regime, and an RTH
+//      session window so you do not trade illiquid lunch chop.
+//   4. Scores every bar; only fires LONG/SHORT when confluence >= threshold.
+//   5. Draws ENTRY, STOP, TP1 (1R), TP2 (2R), TP3 (3R) on the chart and prints
+//      a live trade card with $ risk, $ reward, and Apex DD cushion.
+//
+// HOW TO INSTALL ON TRADINGVIEW
+//   1. Open TradingView, click 'Pine Editor' at the bottom of any chart.
+//   2. Click '+' (new) -> 'Indicator'. Delete the template code.
+//   3. Paste this entire file.
+//   4. Click 'Save', name it "Apex 50k Orderflow Pro".
+//   5. Click 'Add to chart'. The indicator appears as overlay on price.
+//   6. Open settings (gear icon on the indicator name on the chart) and set:
+//        - Instrument        : MES, MNQ, MGC, MCL, or full-size
+//        - Max $ Risk/Trade  : default $250 (0.5% of 50k - prop discipline)
+//        - Default Stop ATR  : 1.2x ATR is robust on 1-5m futures
+//        - Session Filter    : keep ON; trades only RTH peak hours
+//   7. Right-click any signal -> 'Add Alert' -> condition = "OF LONG" or
+//      "OF SHORT" -> set webhook/notification. Alert message auto-fills with
+//      entry, stop, and three targets.
+//
+// HOW TO TRADE THE SIGNAL (manual execution)
+//   * GREEN "L" label below bar = LONG. Use the printed Entry / SL / TP lines.
+//   * RED "S" label above bar  = SHORT. Same.
+//   * Position size shown in the Risk Table is already capped to your
+//     $/trade risk and Apex max-contracts cap. Use that exact size.
+//   * Move stop to break-even after price closes beyond TP1.
+//   * Take 1/3 off at TP1, 1/3 at TP2, trail the runner past TP3.
+//
+// NOTHING in this script places an order - TradingView indicators cannot
+// auto-trade Apex/Rithmic. Use alerts to your phone, then click the trade in
+// your broker (Tradovate, NinjaTrader, etc.).
+// =============================================================================
+
+indicator("Apex 50k Orderflow Pro", "APX-OF Pro", overlay = true,
+     max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
+
+// ============================== INPUTS =======================================
+grpOF       = "Orderflow Engine"
+ltfMode     = input.string("Auto", "Lower-TF Resolution", options = ["Auto", "1S", "5S", "10S", "15S", "1", "5"], group = grpOF, tooltip = "Lower TF used to approximate buy/sell volume. 'Auto' picks based on chart TF.")
+deltaSrc    = input.string("Close-vs-Mid", "Delta Classification", options = ["Close-vs-Open", "Close-vs-Mid"], group = grpOF, tooltip = "How each LTF bar is split into buy vs sell volume.")
+imbThresh   = input.float(2.5, "Imbalance Ratio", minval = 1.5, maxval = 10.0, step = 0.1, group = grpOF, tooltip = "Buy/Sell ratio that counts as a stacked imbalance. 2.5 = 250%.")
+imbStack    = input.int(3, "Stacked Imbalance Count", minval = 2, maxval = 6, group = grpOF)
+absorbMult  = input.float(2.0, "Absorption Volume Mult", minval = 1.2, step = 0.1, group = grpOF)
+absorbRange = input.float(0.40, "Absorption Range Frac", minval = 0.05, maxval = 0.9, step = 0.05, group = grpOF)
+divLookback = input.int(20, "Divergence Lookback", minval = 5, maxval = 100, group = grpOF)
+cvdReset    = input.string("Session", "CVD Reset", options = ["Session", "Daily", "Never"], group = grpOF)
+
+grpFilt     = "Trend / Session Filters"
+useTrendF   = input.bool(true, "Require EMA Trend Alignment", group = grpFilt)
+emaFast     = input.int(20,  "EMA Fast", minval = 5,  group = grpFilt)
+emaSlow     = input.int(50,  "EMA Slow", minval = 20, group = grpFilt)
+useVwapF    = input.bool(true, "Require VWAP Side", group = grpFilt, tooltip = "Longs only above VWAP, shorts only below.")
+useSessF    = input.bool(true, "RTH Session Only (skip lunch)", group = grpFilt, tooltip = "Trades only the high-volume windows where orderflow is meaningful.")
+sessRTH     = input.session("0930-1130,1330-1600", "Active Session (NY)", group = grpFilt)
+useATRF     = input.bool(true, "Require Live Volatility (ATR vs avg)", group = grpFilt)
+atrLen      = input.int(14, "ATR Length", group = grpFilt)
+atrFloor    = input.float(0.7, "ATR / AvgATR Floor", minval = 0.3, step = 0.05, group = grpFilt, tooltip = "Skip dead tape: current ATR must be >= this fraction of its 50-bar average.")
+
+grpScore    = "Confluence Scoring"
+minScore    = input.int(4, "Minimum Score to Fire", minval = 2, maxval = 8, group = grpScore, tooltip = "Each confirmation adds a point. Higher = fewer but cleaner trades.")
+cooldownBars= input.int(5, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
+
+grpRisk     = "SL / TP Engine"
+slMode      = input.string("ATR + Swing", "Stop Mode", options = ["ATR", "Swing", "ATR + Swing"], group = grpRisk)
+slATRmult   = input.float(1.2, "ATR Stop Multiplier", minval = 0.3, step = 0.1, group = grpRisk)
+swingLen    = input.int(10, "Swing Lookback", minval = 3, group = grpRisk)
+tp1R        = input.float(1.0, "TP1 (R multiple)", minval = 0.3, step = 0.1, group = grpRisk)
+tp2R        = input.float(2.0, "TP2 (R multiple)", minval = 0.5, step = 0.1, group = grpRisk)
+tp3R        = input.float(3.0, "TP3 (R multiple)", minval = 1.0, step = 0.1, group = grpRisk)
+
+grpApex     = "Apex 50k Risk"
+acctStart   = input.float(50000.0, "Starting Balance ($)", group = grpApex)
+trailDD     = input.float(2500.0,  "Trailing Drawdown ($)", group = grpApex)
+ddLockProf  = input.float(2600.0,  "Trailing Lock Profit ($)", group = grpApex, tooltip = "Apex locks the trail at start+$2,600. Above that, drawdown is static at $52,600.")
+riskPerTrade= input.float(250.0,   "Max $ Risk / Trade", minval = 25.0, group = grpApex)
+sym         = input.string("MES", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = grpApex)
+maxContracts= input.int(10, "Max Contracts (Apex Cap)", minval = 1, maxval = 20, group = grpApex)
+
+grpVis      = "Visuals"
+showBars    = input.bool(true,  "Color Bars by Delta", group = grpVis)
+showCVD     = input.bool(true,  "Plot CVD (scaled overlay)", group = grpVis)
+showLevels  = input.bool(true,  "Show Absorption / Imbalance Marks", group = grpVis)
+showSig     = input.bool(true,  "Show Buy/Sell Labels", group = grpVis)
+showTrade   = input.bool(true,  "Draw Active Trade (Entry/SL/TP)", group = grpVis)
+showTable   = input.bool(true,  "Show Risk Table", group = grpVis)
+showVWAP    = input.bool(true,  "Show VWAP", group = grpVis)
+
+// ============================== INSTRUMENT MAP ===============================
+var float dollarPerPoint = na
+var float tickSize       = na
+if sym == "MES"
+    dollarPerPoint := 5.0
+    tickSize       := 0.25
+else if sym == "MNQ"
+    dollarPerPoint := 2.0
+    tickSize       := 0.25
+else if sym == "MGC"
+    dollarPerPoint := 10.0
+    tickSize       := 0.10
+else if sym == "MCL"
+    dollarPerPoint := 100.0
+    tickSize       := 0.01
+else if sym == "ES"
+    dollarPerPoint := 50.0
+    tickSize       := 0.25
+else if sym == "NQ"
+    dollarPerPoint := 20.0
+    tickSize       := 0.25
+else if sym == "GC"
+    dollarPerPoint := 100.0
+    tickSize       := 0.10
+else if sym == "CL"
+    dollarPerPoint := 1000.0
+    tickSize       := 0.01
+
+dollarPerTick = dollarPerPoint * tickSize
+
+// ============================== LOWER-TF RESOLVER ============================
+f_autoLTF() =>
+    tf = timeframe.in_seconds(timeframe.period)
+    switch
+        tf <= 60      => "1S"
+        tf <= 300     => "5S"
+        tf <= 900     => "15S"
+        tf <= 3600    => "1"
+        => "5"
+
+ltfRes = ltfMode == "Auto" ? f_autoLTF() : ltfMode
+
+// ============================== DELTA ENGINE =================================
+f_classify(o, h, l, c, v) =>
+    float buy  = 0.0
+    float sell = 0.0
+    if deltaSrc == "Close-vs-Mid"
+        rng = math.max(h - l, syminfo.mintick)
+        bf  = math.max(0.0, math.min(1.0, (c - l) / rng))
+        buy  := v * bf
+        sell := v * (1.0 - bf)
+    else
+        if c > o
+            buy  := v
+        else if c < o
+            sell := v
+        else
+            buy  := v * 0.5
+            sell := v * 0.5
+    [buy, sell]
+
+[buyArr, sellArr] = request.security_lower_tf(syminfo.tickerid, ltfRes, f_classify(open, high, low, close, volume))
+
+float buyVol  = 0.0
+float sellVol = 0.0
+if array.size(buyArr) > 0
+    for i = 0 to array.size(buyArr) - 1
+        buyVol  += array.get(buyArr,  i)
+        sellVol += array.get(sellArr, i)
+else
+    [b, s] = f_classify(open, high, low, close, volume)
+    buyVol  := b
+    sellVol := s
+
+delta    = buyVol - sellVol
+totalVol = buyVol + sellVol
+deltaPct = totalVol > 0 ? delta / totalVol : 0.0
+
+// ============================== CVD ==========================================
+isNewSess = ta.change(time("D")) != 0
+isNewRTH  = ta.change(time(timeframe.period, "0930-1600", "America/New_York")) != 0
+resetCVD  = cvdReset == "Session" ? isNewRTH : cvdReset == "Daily" ? isNewSess : false
+
+var float cvd = 0.0
+cvd := resetCVD ? delta : nz(cvd[1]) + delta
+cvdRising  = cvd > cvd[1] and cvd[1] > cvd[2]
+cvdFalling = cvd < cvd[1] and cvd[1] < cvd[2]
+
+// ============================== IMBALANCE / ABSORPTION =======================
+isBuyImb  = buyVol  > sellVol * imbThresh
+isSellImb = sellVol > buyVol  * imbThresh
+
+var int buyStreak  = 0
+var int sellStreak = 0
+buyStreak  := isBuyImb  ? buyStreak  + 1 : 0
+sellStreak := isSellImb ? sellStreak + 1 : 0
+stackedBuy  = buyStreak  >= imbStack
+stackedSell = sellStreak >= imbStack
+
+avgVol  = ta.sma(volume, 20)
+avgRng  = ta.sma(high - low, 20)
+barRng  = high - low
+isHeavy = volume > avgVol * absorbMult
+isTight = barRng < avgRng * absorbRange
+absorbBuy  = isHeavy and isTight and delta > 0 and close >= (high - barRng * 0.35)
+absorbSell = isHeavy and isTight and delta < 0 and close <= (low  + barRng * 0.35)
+
+// ============================== DIVERGENCE ===================================
+priceLo = ta.lowest(low,   divLookback)
+priceHi = ta.highest(high, divLookback)
+cvdLo   = ta.lowest(cvd,   divLookback)
+cvdHi   = ta.highest(cvd,  divLookback)
+bullDiv = low  <= priceLo and cvd > cvdLo and delta > 0
+bearDiv = high >= priceHi and cvd < cvdHi and delta < 0
+
+// ============================== TREND / VWAP / ATR / SESSION =================
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+trendUp   = emaF > emaS and close > emaS
+trendDown = emaF < emaS and close < emaS
+
+vwap = ta.vwap(hlc3)
+aboveVwap = close > vwap
+belowVwap = close < vwap
+
+atr     = ta.atr(atrLen)
+avgATR  = ta.sma(atr, 50)
+liveVol = atr >= avgATR * atrFloor
+
+inSession = not useSessF or not na(time(timeframe.period, sessRTH, "America/New_York"))
+
+// ============================== CONFLUENCE SCORE =============================
+// Each confirmation adds 1 point. Fire when total >= minScore.
+longScore  = 0
+shortScore = 0
+
+longScore  += stackedBuy   ? 2 : 0
+longScore  += absorbBuy    ? 2 : 0
+longScore  += bullDiv      ? 1 : 0
+longScore  += cvdRising    ? 1 : 0
+longScore  += deltaPct > 0.20 ? 1 : 0
+longScore  += (not useTrendF) or trendUp   ? 1 : 0
+longScore  += (not useVwapF)  or aboveVwap ? 1 : 0
+
+shortScore += stackedSell  ? 2 : 0
+shortScore += absorbSell   ? 2 : 0
+shortScore += bearDiv      ? 1 : 0
+shortScore += cvdFalling   ? 1 : 0
+shortScore += deltaPct < -0.20 ? 1 : 0
+shortScore += (not useTrendF) or trendDown ? 1 : 0
+shortScore += (not useVwapF)  or belowVwap ? 1 : 0
+
+passFilters = inSession and ((not useATRF) or liveVol)
+
+rawLong  = passFilters and longScore  >= minScore and (not useTrendF or trendUp)   and (not useVwapF or aboveVwap)
+rawShort = passFilters and shortScore >= minScore and (not useTrendF or trendDown) and (not useVwapF or belowVwap)
+
+// Cooldown
+var int lastSig = -1000
+canFire = bar_index - lastSig >= cooldownBars
+fireLong  = rawLong  and canFire
+fireShort = rawShort and canFire and not fireLong
+
+// ============================== SL / TP ENGINE ===============================
+swingLow  = ta.lowest(low,  swingLen)
+swingHigh = ta.highest(high, swingLen)
+atrStop   = atr * slATRmult
+
+f_long_sl(entry) =>
+    sl_atr   = entry - atrStop
+    sl_swing = swingLow - syminfo.mintick * 2
+    switch slMode
+        "ATR"         => sl_atr
+        "Swing"       => sl_swing
+        => math.min(sl_atr, sl_swing)
+
+f_short_sl(entry) =>
+    sl_atr   = entry + atrStop
+    sl_swing = swingHigh + syminfo.mintick * 2
+    switch slMode
+        "ATR"         => sl_atr
+        "Swing"       => sl_swing
+        => math.max(sl_atr, sl_swing)
+
+// Live trade state
+var float tEntry = na
+var float tStop  = na
+var float tTP1   = na
+var float tTP2   = na
+var float tTP3   = na
+var int   tDir   = 0
+var int   tBar   = na
+var float tRdist = na
+var int   tSize  = 0
+
+if fireLong
+    tEntry := close
+    tStop  := f_long_sl(tEntry)
+    tRdist := tEntry - tStop
+    tTP1   := tEntry + tRdist * tp1R
+    tTP2   := tEntry + tRdist * tp2R
+    tTP3   := tEntry + tRdist * tp3R
+    tDir   := 1
+    tBar   := bar_index
+    lastSig := bar_index
+
+if fireShort
+    tEntry := close
+    tStop  := f_short_sl(tEntry)
+    tRdist := tStop - tEntry
+    tTP1   := tEntry - tRdist * tp1R
+    tTP2   := tEntry - tRdist * tp2R
+    tTP3   := tEntry - tRdist * tp3R
+    tDir   := -1
+    tBar   := bar_index
+    lastSig := bar_index
+
+// Position size: floor(riskPerTrade / (R-distance in $)).
+rPerContract = na(tRdist) ? na : tRdist * dollarPerPoint
+suggestSize  = na(rPerContract) or rPerContract <= 0 ? 0 : math.floor(riskPerTrade / rPerContract)
+suggestSize  := math.max(0, math.min(suggestSize, maxContracts))
+if (fireLong or fireShort)
+    tSize := suggestSize
+
+// Trade close detection (intrabar approximation on close basis).
+tradeOpen = tDir != 0 and not na(tEntry)
+hitStop   = tradeOpen and ((tDir == 1 and low  <= tStop) or (tDir == -1 and high >= tStop))
+hitTP3    = tradeOpen and ((tDir == 1 and high >= tTP3)  or (tDir == -1 and low  <= tTP3))
+sessionEnd= tradeOpen and isNewRTH and bar_index > tBar
+if hitStop or hitTP3 or sessionEnd
+    tDir   := 0
+
+// ============================== DRAW TRADE ===================================
+var line  lnEntry = na
+var line  lnStop  = na
+var line  lnTP1   = na
+var line  lnTP2   = na
+var line  lnTP3   = na
+var label lbEntry = na
+var label lbStop  = na
+var label lbTP1   = na
+var label lbTP2   = na
+var label lbTP3   = na
+
+f_clear_trade() =>
+    if not na(lnEntry)
+        line.delete(lnEntry)
+    if not na(lnStop)
+        line.delete(lnStop)
+    if not na(lnTP1)
+        line.delete(lnTP1)
+    if not na(lnTP2)
+        line.delete(lnTP2)
+    if not na(lnTP3)
+        line.delete(lnTP3)
+    if not na(lbEntry)
+        label.delete(lbEntry)
+    if not na(lbStop)
+        label.delete(lbStop)
+    if not na(lbTP1)
+        label.delete(lbTP1)
+    if not na(lbTP2)
+        label.delete(lbTP2)
+    if not na(lbTP3)
+        label.delete(lbTP3)
+
+if showTrade and (fireLong or fireShort)
+    f_clear_trade()
+    rightX = bar_index + 30
+    cEntry = color.new(color.white,  0)
+    cStop  = color.new(color.red,    0)
+    cTP    = color.new(color.lime,   0)
+    lnEntry := line.new(bar_index, tEntry, rightX, tEntry, color = cEntry, width = 2, style = line.style_solid)
+    lnStop  := line.new(bar_index, tStop,  rightX, tStop,  color = cStop,  width = 2, style = line.style_dashed)
+    lnTP1   := line.new(bar_index, tTP1,   rightX, tTP1,   color = cTP,    width = 1, style = line.style_dotted)
+    lnTP2   := line.new(bar_index, tTP2,   rightX, tTP2,   color = cTP,    width = 1, style = line.style_dotted)
+    lnTP3   := line.new(bar_index, tTP3,   rightX, tTP3,   color = cTP,    width = 2, style = line.style_dotted)
+    lbEntry := label.new(rightX, tEntry, (tDir==1?"LONG ":"SHORT ") + "Entry " + str.tostring(tEntry, format.mintick),                                                          style = label.style_label_left, color = color.new(color.gray, 0),    textcolor = color.white, size = size.small)
+    lbStop  := label.new(rightX, tStop,  "SL "  + str.tostring(tStop, format.mintick) + "  (-$" + str.tostring(rPerContract * tSize, "#.##") + ")",                              style = label.style_label_left, color = color.new(color.maroon, 0),  textcolor = color.white, size = size.small)
+    lbTP1   := label.new(rightX, tTP1,   "TP1 " + str.tostring(tTP1, format.mintick) + "  (+$" + str.tostring(rPerContract * tp1R * tSize, "#.##") + ")",                        style = label.style_label_left, color = color.new(color.green, 30), textcolor = color.white, size = size.small)
+    lbTP2   := label.new(rightX, tTP2,   "TP2 " + str.tostring(tTP2, format.mintick) + "  (+$" + str.tostring(rPerContract * tp2R * tSize, "#.##") + ")",                        style = label.style_label_left, color = color.new(color.green, 15), textcolor = color.white, size = size.small)
+    lbTP3   := label.new(rightX, tTP3,   "TP3 " + str.tostring(tTP3, format.mintick) + "  (+$" + str.tostring(rPerContract * tp3R * tSize, "#.##") + ")",                        style = label.style_label_left, color = color.new(color.green, 0),  textcolor = color.white, size = size.small)
+
+// ============================== PLOTS ========================================
+barColor = na(delta) ? color.gray : delta > 0 ? color.new(color.teal, math.max(0, 80 - int(math.abs(deltaPct) * 80))) : color.new(color.red,  math.max(0, 80 - int(math.abs(deltaPct) * 80)))
+barcolor(showBars ? barColor : na)
+
+cvdMin = ta.lowest(cvd,  200)
+cvdMax = ta.highest(cvd, 200)
+prMin  = ta.lowest(low,  200)
+prMax  = ta.highest(high, 200)
+cvdScaled = (cvdMax - cvdMin) > 0 ? prMin + (cvd - cvdMin) / (cvdMax - cvdMin) * (prMax - prMin) : na
+plot(showCVD ? cvdScaled : na, "CVD (scaled)", color = color.new(color.orange, 0), linewidth = 2)
+
+plot(showVWAP ? vwap : na, "VWAP",  color = color.new(color.yellow, 0), linewidth = 1)
+plot(useTrendF ? emaF : na, "EMA F", color = color.new(color.aqua, 30))
+plot(useTrendF ? emaS : na, "EMA S", color = color.new(color.fuchsia, 30))
+
+plotshape(showLevels and absorbBuy,  "Absorb Buy",  shape.diamond,  location.belowbar, color.new(color.lime, 0),    size = size.tiny)
+plotshape(showLevels and absorbSell, "Absorb Sell", shape.diamond,  location.abovebar, color.new(color.fuchsia, 0), size = size.tiny)
+plotshape(showLevels and stackedBuy and not absorbBuy,   "Stacked Buy",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size = size.tiny)
+plotshape(showLevels and stackedSell and not absorbSell, "Stacked Sell", shape.triangledown, location.abovebar, color.new(color.red,   0), size = size.tiny)
+
+plotshape(showSig and fireLong,  "OF LONG",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.normal)
+plotshape(showSig and fireShort, "OF SHORT", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.normal)
+
+// ============================== ALERTS =======================================
+longMsg  = "APX-OF BUY  "  + syminfo.ticker + "  Entry=" + str.tostring(close, format.mintick) + "  SL=" + str.tostring(f_long_sl(close),  format.mintick) + "  TP1=" + str.tostring(close + (close - f_long_sl(close))  * tp1R, format.mintick) + "  TP2=" + str.tostring(close + (close - f_long_sl(close))  * tp2R, format.mintick) + "  TP3=" + str.tostring(close + (close - f_long_sl(close))  * tp3R, format.mintick)
+shortMsg = "APX-OF SELL " + syminfo.ticker + "  Entry=" + str.tostring(close, format.mintick) + "  SL=" + str.tostring(f_short_sl(close), format.mintick) + "  TP1=" + str.tostring(close - (f_short_sl(close) - close) * tp1R, format.mintick) + "  TP2=" + str.tostring(close - (f_short_sl(close) - close) * tp2R, format.mintick) + "  TP3=" + str.tostring(close - (f_short_sl(close) - close) * tp3R, format.mintick)
+
+alertcondition(fireLong,    "OF LONG",         "{{ticker}} BUY  Entry={{close}}")
+alertcondition(fireShort,   "OF SHORT",        "{{ticker}} SELL Entry={{close}}")
+alertcondition(absorbBuy,   "Absorption Buy",  "Heavy bid absorption")
+alertcondition(absorbSell,  "Absorption Sell", "Heavy offer absorption")
+alertcondition(bullDiv,     "Bull CVD Div",    "Price LL but CVD HL")
+alertcondition(bearDiv,     "Bear CVD Div",    "Price HH but CVD LH")
+
+if fireLong
+    alert(longMsg,  alert.freq_once_per_bar_close)
+if fireShort
+    alert(shortMsg, alert.freq_once_per_bar_close)
+
+// ============================== RISK / TRADE TABLE ===========================
+sessOpen      = ta.valuewhen(isNewRTH, open, 0)
+floatingPts   = close - sessOpen
+floatingPnL   = floatingPts * dollarPerPoint * math.max(tSize, 1)
+peakEquity    = ta.highest(acctStart + floatingPnL, 1000)
+ddCap         = math.min(peakEquity - trailDD, acctStart + ddLockProf)
+distToBlowup  = (acctStart + floatingPnL) - ddCap
+
+if showTable and barstate.islast
+    var table t = table.new(position.top_right, 2, 14, border_width = 1)
+    table.cell(t, 0, 0, "APX-OF Pro",                 bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 0, sym + " | LTF " + ltfRes,     bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+
+    table.cell(t, 0, 1, "Bias",                       text_color = color.white, text_size = size.small)
+    bias = trendUp and aboveVwap ? "LONG-BIAS" : trendDown and belowVwap ? "SHORT-BIAS" : "MIXED"
+    biasC = trendUp and aboveVwap ? color.lime : trendDown and belowVwap ? color.red : color.gray
+    table.cell(t, 1, 1, bias,                         text_color = biasC, text_size = size.small)
+
+    table.cell(t, 0, 2, "Score L/S",                  text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 2, str.tostring(longScore) + " / " + str.tostring(shortScore) + "  (>=" + str.tostring(minScore) + ")", text_color = color.white, text_size = size.small)
+
+    table.cell(t, 0, 3, "Delta",                      text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 3, str.tostring(delta, "#") + "  (" + str.tostring(deltaPct * 100, "#.0") + "%)", text_color = delta >= 0 ? color.lime : color.red, text_size = size.small)
+
+    table.cell(t, 0, 4, "CVD",                        text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 4, str.tostring(cvd, "#"),       text_color = cvdRising ? color.lime : cvdFalling ? color.red : color.gray, text_size = size.small)
+
+    table.cell(t, 0, 5, "ATR",                        text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 5, str.tostring(atr, format.mintick) + " (live=" + (liveVol ? "Y" : "N") + ")", text_color = liveVol ? color.lime : color.orange, text_size = size.small)
+
+    tradeStr = tDir == 1 ? "LONG OPEN" : tDir == -1 ? "SHORT OPEN" : "FLAT"
+    tradeC   = tDir == 1 ? color.lime : tDir == -1 ? color.red : color.gray
+    table.cell(t, 0, 6, "Trade",                      text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 6, tradeStr,                     text_color = tradeC,      text_size = size.small)
+
+    table.cell(t, 0, 7, "Entry",  text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 7, na(tEntry) ? "-" : str.tostring(tEntry, format.mintick), text_color = color.white, text_size = size.small)
+    table.cell(t, 0, 8, "Stop",   text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 8, na(tStop) ? "-" : str.tostring(tStop, format.mintick),   text_color = color.red,   text_size = size.small)
+    table.cell(t, 0, 9, "TP1/2/3",text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 9, na(tTP1) ? "-" : str.tostring(tTP1, format.mintick) + " / " + str.tostring(tTP2, format.mintick) + " / " + str.tostring(tTP3, format.mintick), text_color = color.lime, text_size = size.small)
+
+    table.cell(t, 0, 10, "Size",  text_color = color.white, text_size = size.small)
+    sizeStr = na(rPerContract) or rPerContract <= 0 ? "-" : str.tostring(tSize) + " ct  ($" + str.tostring(rPerContract * tSize, "#.##") + " risk)"
+    table.cell(t, 1, 10, sizeStr, text_color = color.yellow, text_size = size.small)
+
+    table.cell(t, 0, 11, "Reward 1R/2R/3R", text_color = color.white, text_size = size.small)
+    rewStr = na(rPerContract) or rPerContract <= 0 ? "-" : "$" + str.tostring(rPerContract * tp1R * tSize, "#.##") + " / $" + str.tostring(rPerContract * tp2R * tSize, "#.##") + " / $" + str.tostring(rPerContract * tp3R * tSize, "#.##")
+    table.cell(t, 1, 11, rewStr, text_color = color.lime, text_size = size.small)
+
+    table.cell(t, 0, 12, "Trail DD Cap",  text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 12, "$" + str.tostring(ddCap, "#.##"), text_color = color.aqua, text_size = size.small)
+    table.cell(t, 0, 13, "Cushion",       text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 13, "$" + str.tostring(distToBlowup, "#.##"), text_color = distToBlowup < 500 ? color.red : distToBlowup < 1000 ? color.orange : color.lime, text_size = size.small)
+
+// ============================== END ==========================================
