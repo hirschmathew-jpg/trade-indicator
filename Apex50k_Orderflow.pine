@@ -31,9 +31,9 @@ atrMin      = input.float(0.3, "ATR Floor (vs avg)",   minval = 0.1, step = 0.05
 atrMax      = input.float(3.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gFilt)
 
 gSig      = "Signal Tweaks"
-brkMinRng = input.float(0.5,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
-pullDepth = input.float(0.3,  "Pullback Depth / ATR",   minval = 0.05, step = 0.05, group = gSig)
-pullStreak= input.int(5,      "Min Trend Streak for Pullback", minval = 3, group = gSig)
+brkMinRng = input.float(0.3,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
+pullDepth = input.float(0.5,  "Pullback Depth / ATR",   minval = 0.05, step = 0.05, group = gSig)
+pullStreak= input.int(3,      "Min Trend Streak for Pullback", minval = 1, group = gSig)
 allowLong = input.bool(true,  "Allow Long Entries",  group = gSig)
 allowShort= input.bool(true,  "Allow Short Entries", group = gSig)
 
@@ -54,10 +54,10 @@ slMode    = input.string("ATR", "Stop Mode", options = ["ATR","Swing","ATR + Swi
 slATR     = input.float(1.0, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
 swingLen  = input.int(8,     "Swing Lookback", minval = 3, maxval = 30, group = gRisk)
 atrLen    = input.int(14,    "ATR Length", group = gRisk)
-tp1R      = input.float(1.0, "TP1 R", group = gRisk)
+tp1R      = input.float(0.75, "TP1 R", group = gRisk)
 tp2R      = input.float(2.0, "TP2 R", group = gRisk)
 tp3R      = input.float(4.0, "TP3 R", group = gRisk)
-cooldown  = input.int(3,     "Cooldown Bars", minval = 0, group = gRisk)
+cooldown  = input.int(0,     "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k"
 acctStart = input.float(50000.0, "Starting Balance ($)", group = gApex)

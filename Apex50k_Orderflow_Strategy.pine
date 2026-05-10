@@ -1,7 +1,10 @@
 //@version=6
 // =============================================================================
-// Apex 50k OF Strategy v2 - multi-pattern, HTF-biased, regime-filtered
+// Apex 50k OF Strategy v2.2 - multi-pattern, HTF-biased, regime-filtered
 // -----------------------------------------------------------------------------
+// RECOMMENDED CHART: MNQ1! on 3-minute or 5-minute timeframe.
+//   1m is too noisy for breakouts; 15m+ produces too few signals.
+//
 // Two uncorrelated entry patterns running together:
 //   1. OR Breakout - first close beyond opening range with strength filter
 //   2. VWAP Pullback - retest of VWAP in established trend, reversal bar
@@ -58,9 +61,9 @@ atrMin      = input.float(0.3, "ATR Floor (vs 50-bar avg)",  minval = 0.1, step 
 atrMax      = input.float(3.0, "ATR Ceiling (vs 50-bar avg)", minval = 1.0, step = 0.1, group = gFilt)
 
 gSig      = "Signal Tweaks"
-brkMinRng = input.float(0.5,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
-pullDepth = input.float(0.3,  "Pullback Depth / ATR",   minval = 0.05, step = 0.05, group = gSig, tooltip = "Pullback must dip within this ATR fraction of VWAP to qualify.")
-pullStreak= input.int(5,      "Min Trend Streak for Pullback", minval = 3, group = gSig, tooltip = "Bars on the trending side of VWAP required before a pullback counts.")
+brkMinRng = input.float(0.3,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
+pullDepth = input.float(0.5,  "Pullback Depth / ATR",   minval = 0.05, step = 0.05, group = gSig, tooltip = "Pullback must dip within this ATR fraction of VWAP to qualify. Higher = more pullbacks qualify.")
+pullStreak= input.int(3,      "Min Trend Streak for Pullback", minval = 1, group = gSig, tooltip = "Bars on the trending side of VWAP required before a pullback counts.")
 allowLong = input.bool(true,  "Allow Long Entries",  group = gSig)
 allowShort= input.bool(true,  "Allow Short Entries", group = gSig)
 
@@ -81,13 +84,13 @@ slMode    = input.string("ATR", "Stop Mode", options = ["ATR","Swing","ATR + Swi
 slATR     = input.float(1.0, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
 swingLen  = input.int(8,     "Swing Lookback", minval = 3, maxval = 30, group = gRisk)
 atrLen    = input.int(14,    "ATR Length", group = gRisk)
-tp1R      = input.float(1.0, "TP1 R", group = gRisk)
+tp1R      = input.float(0.75, "TP1 R", group = gRisk, tooltip = "0.75R lifts partial-fill rate substantially. The 1/3 close at TP1 now hits much more often, smoothing equity curve.")
 tp2R      = input.float(2.0, "TP2 R", group = gRisk)
 tp3R      = input.float(4.0, "TP3 R", group = gRisk)
 beAfter1  = input.bool(false, "Move SL to BE after TP1", group = gRisk)
 useTrail  = input.bool(true,  "Trail Stop on Runner after TP2", group = gRisk, tooltip = "After TP2 fills, the remaining 1/3 trails with ATR for max-capture.")
 trailMult = input.float(2.5,  "Runner Trail ATR Mult", minval = 0.5, step = 0.1, group = gRisk, tooltip = "2.5 lets runners breathe; 1.5 cuts them short.")
-cooldown  = input.int(3,      "Cooldown Bars", minval = 0, group = gRisk)
+cooldown  = input.int(0,      "Cooldown Bars", minval = 0, group = gRisk, tooltip = "0 = fire whenever trigger conditions are met. Strategy.position_size==0 already prevents stacking entries.")
 
 gApex     = "Apex 50k Sizing"
 riskTrade = input.float(400.0, "Max $ Risk / Trade", minval = 25.0, group = gApex)
