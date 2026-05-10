@@ -85,11 +85,11 @@ tp3R        = input.float(3.0, "TP3 (R multiple)", minval = 1.0, step = 0.1, gro
 
 grpApex     = "Apex 50k Risk"
 acctStart   = input.float(50000.0, "Starting Balance ($)", group = grpApex)
-trailDD     = input.float(2500.0,  "Trailing Drawdown ($)", group = grpApex)
-ddLockProf  = input.float(2600.0,  "Trailing Lock Profit ($)", group = grpApex, tooltip = "Apex locks the trail at start+$2,600. Above that, drawdown is static at $52,600.")
+trailDD     = input.float(2000.0,  "Trailing Drawdown ($)", group = grpApex)
+ddLockProf  = input.float(2100.0,  "Trailing Lock Profit ($)", group = grpApex, tooltip = "Apex locks the trail at start+$2,100 = $52,100 net (Static 50k PA variant).")
 riskPerTrade= input.float(250.0,   "Max $ Risk / Trade", minval = 25.0, group = grpApex)
-sym         = input.string("MES", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = grpApex)
-maxContracts= input.int(10, "Max Contracts (Apex Cap)", minval = 1, maxval = 20, group = grpApex)
+sym         = input.string("MNQ", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = grpApex)
+maxContracts= input.int(20, "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = grpApex)
 
 grpVis      = "Visuals"
 showBars    = input.bool(true,  "Color Bars by Delta", group = grpVis)
@@ -377,11 +377,11 @@ if showTrade and (fireLong or fireShort)
     lnTP1   := line.new(bar_index, tTP1,   rightX, tTP1,   color = cTP,    width = 1, style = line.style_dotted)
     lnTP2   := line.new(bar_index, tTP2,   rightX, tTP2,   color = cTP,    width = 1, style = line.style_dotted)
     lnTP3   := line.new(bar_index, tTP3,   rightX, tTP3,   color = cTP,    width = 2, style = line.style_dotted)
-    lbEntry := label.new(rightX, tEntry, (tDir==1?"LONG ":"SHORT ") + "Entry " + str.tostring(tEntry, format.mintick),                                                          style = label.style_label_left, color = color.new(color.gray, 0),    textcolor = color.white, size = size.small)
-    lbStop  := label.new(rightX, tStop,  "SL "  + str.tostring(tStop, format.mintick) + "  (-$" + str.tostring(rPerContract * tSize, "#.##") + ")",                              style = label.style_label_left, color = color.new(color.maroon, 0),  textcolor = color.white, size = size.small)
-    lbTP1   := label.new(rightX, tTP1,   "TP1 " + str.tostring(tTP1, format.mintick) + "  (+$" + str.tostring(rPerContract * tp1R * tSize, "#.##") + ")",                        style = label.style_label_left, color = color.new(color.green, 30), textcolor = color.white, size = size.small)
-    lbTP2   := label.new(rightX, tTP2,   "TP2 " + str.tostring(tTP2, format.mintick) + "  (+$" + str.tostring(rPerContract * tp2R * tSize, "#.##") + ")",                        style = label.style_label_left, color = color.new(color.green, 15), textcolor = color.white, size = size.small)
-    lbTP3   := label.new(rightX, tTP3,   "TP3 " + str.tostring(tTP3, format.mintick) + "  (+$" + str.tostring(rPerContract * tp3R * tSize, "#.##") + ")",                        style = label.style_label_left, color = color.new(color.green, 0),  textcolor = color.white, size = size.small)
+    lbEntry := label.new(rightX, tEntry, (tDir==1?"LONG ":"SHORT ") + "Entry " + str.tostring(tEntry, format.mintick) + "  x " + str.tostring(tSize) + " ct", style = label.style_label_left, color = color.new(color.silver, 0), textcolor = color.black, size = size.small)
+    lbStop  := label.new(rightX, tStop,  "SL "  + str.tostring(tStop, format.mintick) + "  (-$" + str.tostring(rPerContract * tSize, "#.##") + ")", style = label.style_label_left, color = color.new(#ffb3b3, 0), textcolor = color.black, size = size.small)
+    lbTP1   := label.new(rightX, tTP1,   "TP1 " + str.tostring(tTP1, format.mintick) + "  (+$" + str.tostring(rPerContract * tp1R * tSize, "#.##") + ")", style = label.style_label_left, color = color.new(#c8f7c5, 0), textcolor = color.black, size = size.small)
+    lbTP2   := label.new(rightX, tTP2,   "TP2 " + str.tostring(tTP2, format.mintick) + "  (+$" + str.tostring(rPerContract * tp2R * tSize, "#.##") + ")", style = label.style_label_left, color = color.new(#a8f5a3, 0), textcolor = color.black, size = size.small)
+    lbTP3   := label.new(rightX, tTP3,   "TP3 " + str.tostring(tTP3, format.mintick) + "  (+$" + str.tostring(rPerContract * tp3R * tSize, "#.##") + ")", style = label.style_label_left, color = color.new(#7df077, 0), textcolor = color.black, size = size.small)
 
 // ============================== PLOTS ========================================
 barColor = na(delta) ? color.gray : delta > 0 ? color.new(color.teal, math.max(0, 80 - int(math.abs(deltaPct) * 80))) : color.new(color.red,  math.max(0, 80 - int(math.abs(deltaPct) * 80)))
@@ -431,50 +431,52 @@ ddCap         = math.min(peakEquity - trailDD, acctStart + ddLockProf)
 distToBlowup  = (acctStart + floatingPnL) - ddCap
 
 if showTable and barstate.islast
-    var table t = table.new(position.top_right, 2, 14, border_width = 1)
+    var table t = table.new(position.top_right, 2, 14, border_width = 1, border_color = color.new(color.gray, 60))
+    bgLabel = color.new(color.silver, 30)
+    bgValue = color.new(color.white,  0)
+
     table.cell(t, 0, 0, "APX-OF Pro",                 bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
     table.cell(t, 1, 0, sym + " | LTF " + ltfRes,     bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
 
-    table.cell(t, 0, 1, "Bias",                       text_color = color.white, text_size = size.small)
-    bias = trendUp and aboveVwap ? "LONG-BIAS" : trendDown and belowVwap ? "SHORT-BIAS" : "MIXED"
-    biasC = trendUp and aboveVwap ? color.lime : trendDown and belowVwap ? color.red : color.gray
-    table.cell(t, 1, 1, bias,                         text_color = biasC, text_size = size.small)
+    table.cell(t, 0, 1, "Bias",                       bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    bias  = trendUp and aboveVwap ? "LONG-BIAS" : trendDown and belowVwap ? "SHORT-BIAS" : "MIXED"
+    biasC = trendUp and aboveVwap ? color.new(color.green, 0) : trendDown and belowVwap ? color.new(color.red, 0) : color.black
+    table.cell(t, 1, 1, bias,                         bgcolor = bgValue, text_color = biasC, text_size = size.small)
 
-    table.cell(t, 0, 2, "Score L/S",                  text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 2, str.tostring(longScore) + " / " + str.tostring(shortScore) + "  (>=" + str.tostring(minScore) + ")", text_color = color.white, text_size = size.small)
+    table.cell(t, 0, 2, "Score L/S",                  bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 2, str.tostring(longScore) + " / " + str.tostring(shortScore) + "  (>=" + str.tostring(minScore) + ")", bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 3, "Delta",                      text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 3, str.tostring(delta, "#") + "  (" + str.tostring(deltaPct * 100, "#.0") + "%)", text_color = delta >= 0 ? color.lime : color.red, text_size = size.small)
+    table.cell(t, 0, 3, "Delta",                      bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 3, str.tostring(delta, "#") + "  (" + str.tostring(deltaPct * 100, "#.0") + "%)", bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 4, "CVD",                        text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 4, str.tostring(cvd, "#"),       text_color = cvdRising ? color.lime : cvdFalling ? color.red : color.gray, text_size = size.small)
+    table.cell(t, 0, 4, "CVD",                        bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 4, str.tostring(cvd, "#"),       bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 5, "ATR",                        text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 5, str.tostring(atr, format.mintick) + " (live=" + (liveVol ? "Y" : "N") + ")", text_color = liveVol ? color.lime : color.orange, text_size = size.small)
+    table.cell(t, 0, 5, "ATR",                        bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 5, str.tostring(atr, format.mintick) + " (live=" + (liveVol ? "Y" : "N") + ")", bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
     tradeStr = tDir == 1 ? "LONG OPEN" : tDir == -1 ? "SHORT OPEN" : "FLAT"
-    tradeC   = tDir == 1 ? color.lime : tDir == -1 ? color.red : color.gray
-    table.cell(t, 0, 6, "Trade",                      text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 6, tradeStr,                     text_color = tradeC,      text_size = size.small)
+    table.cell(t, 0, 6, "Trade",                      bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 6, tradeStr,                     bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 7, "Entry",  text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 7, na(tEntry) ? "-" : str.tostring(tEntry, format.mintick), text_color = color.white, text_size = size.small)
-    table.cell(t, 0, 8, "Stop",   text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 8, na(tStop) ? "-" : str.tostring(tStop, format.mintick),   text_color = color.red,   text_size = size.small)
-    table.cell(t, 0, 9, "TP1/2/3",text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 9, na(tTP1) ? "-" : str.tostring(tTP1, format.mintick) + " / " + str.tostring(tTP2, format.mintick) + " / " + str.tostring(tTP3, format.mintick), text_color = color.lime, text_size = size.small)
+    table.cell(t, 0, 7, "Entry",   bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 7, na(tEntry) ? "-" : str.tostring(tEntry, format.mintick), bgcolor = bgValue, text_color = color.black, text_size = size.small)
+    table.cell(t, 0, 8, "Stop",    bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 8, na(tStop)  ? "-" : str.tostring(tStop,  format.mintick), bgcolor = bgValue, text_color = color.black, text_size = size.small)
+    table.cell(t, 0, 9, "TP1/2/3", bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 9, na(tTP1)   ? "-" : str.tostring(tTP1, format.mintick) + " / " + str.tostring(tTP2, format.mintick) + " / " + str.tostring(tTP3, format.mintick), bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 10, "Size",  text_color = color.white, text_size = size.small)
+    table.cell(t, 0, 10, "Size",   bgcolor = bgLabel, text_color = color.black, text_size = size.small)
     sizeStr = na(rPerContract) or rPerContract <= 0 ? "-" : str.tostring(tSize) + " ct  ($" + str.tostring(rPerContract * tSize, "#.##") + " risk)"
-    table.cell(t, 1, 10, sizeStr, text_color = color.yellow, text_size = size.small)
+    table.cell(t, 1, 10, sizeStr,  bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 11, "Reward 1R/2R/3R", text_color = color.white, text_size = size.small)
+    table.cell(t, 0, 11, "Reward 1R/2R/3R", bgcolor = bgLabel, text_color = color.black, text_size = size.small)
     rewStr = na(rPerContract) or rPerContract <= 0 ? "-" : "$" + str.tostring(rPerContract * tp1R * tSize, "#.##") + " / $" + str.tostring(rPerContract * tp2R * tSize, "#.##") + " / $" + str.tostring(rPerContract * tp3R * tSize, "#.##")
-    table.cell(t, 1, 11, rewStr, text_color = color.lime, text_size = size.small)
+    table.cell(t, 1, 11, rewStr,   bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 12, "Trail DD Cap",  text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 12, "$" + str.tostring(ddCap, "#.##"), text_color = color.aqua, text_size = size.small)
-    table.cell(t, 0, 13, "Cushion",       text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 13, "$" + str.tostring(distToBlowup, "#.##"), text_color = distToBlowup < 500 ? color.red : distToBlowup < 1000 ? color.orange : color.lime, text_size = size.small)
+    table.cell(t, 0, 12, "Trail DD Cap",  bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 12, "$" + str.tostring(ddCap, "#.##"), bgcolor = bgValue, text_color = color.black, text_size = size.small)
+    table.cell(t, 0, 13, "Cushion",       bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    table.cell(t, 1, 13, "$" + str.tostring(distToBlowup, "#.##"), bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
 // ============================== END ==========================================
