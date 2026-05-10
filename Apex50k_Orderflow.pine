@@ -1,32 +1,37 @@
 //@version=6
 // =============================================================================
-// Apex 50k Orderflow Indicator - clean session-only intraday
+// Apex 50k Orderflow Indicator - matches the strategy file's signal logic
 // -----------------------------------------------------------------------------
 // Live BUY/SELL labels with Entry, SL, TP1/TP2/TP3 lines drawn on chart.
-// Same trigger + confirmation + VWAP-veto logic as the strategy file so the
-// signals you see here are the signals the backtester counts.
+// Same trigger model as the backtest strategy: OR breakout + (optional)
+// orderflow trigger + (optional) VWAP veto. Auto-detects symbol $/point.
 // =============================================================================
 
 indicator("Apex 50k Orderflow", "APX-OF", overlay = true,
      max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
 
 // ============================== INPUTS =======================================
+gSig      = "Signal"
+useORBrk  = input.bool(true,  "OR Breakout Trigger",  group = gSig)
+useOFTrig = input.bool(true,  "Orderflow Triggers (imb/absorb/delta)", group = gSig)
+useVwap   = input.bool(true,  "Require VWAP Side (veto)",  group = gSig)
+useOFConf = input.bool(false, "Require Orderflow Confirm on OR Break", group = gSig)
+
 gOF       = "Orderflow"
 ltfMode   = input.string("Auto", "Lower-TF", options = ["Auto","1S","5S","15S","1","5"], group = gOF)
-imbThresh = input.float(1.8, "Imbalance Ratio",       minval = 1.3, step = 0.1, group = gOF)
+imbThresh = input.float(1.8, "Imbalance Ratio",        minval = 1.3, step = 0.1, group = gOF)
 imbStack  = input.int(2,     "Stacked Imbalance Bars", minval = 1, maxval = 5, group = gOF)
-absVolMul = input.float(1.7, "Absorption Vol Mult",   minval = 1.1, step = 0.1, group = gOF)
-strongDel = input.float(0.25, "Strong Delta % Threshold", minval = 0.10, step = 0.05, group = gOF)
+absVolMul = input.float(1.7, "Absorption Vol Mult",    minval = 1.1, step = 0.1, group = gOF)
+strongDel = input.float(0.20, "Strong Delta % Threshold", minval = 0.10, step = 0.05, group = gOF)
 
 gSess     = "Session"
 sessRTH   = input.session("0930-1600", "RTH (NY)",        group = gSess)
 flatBy    = input.session("1555-1600", "Force-Flat (NY)", group = gSess)
-orMin     = input.int(5,    "Opening Range Minutes", minval = 1, maxval = 30, group = gSess)
-useVwap   = input.bool(true, "Require VWAP Side (veto)", group = gSess)
+orMin     = input.int(15, "Opening Range Minutes", minval = 1, maxval = 60, group = gSess)
 
 gRisk     = "Risk / SL / TP"
 slMode    = input.string("ATR + Swing", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = gRisk)
-slATR     = input.float(1.2, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
+slATR     = input.float(1.5, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
 swingLen  = input.int(8,     "Swing Lookback", minval = 3, maxval = 30, group = gRisk)
 atrLen    = input.int(14,    "ATR Length", group = gRisk)
 tp1R      = input.float(1.0, "TP1 R", group = gRisk)
@@ -35,22 +40,21 @@ tp3R      = input.float(3.0, "TP3 R", group = gRisk)
 cooldown  = input.int(5,     "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k"
-sym       = input.string("MNQ", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = gApex)
 acctStart = input.float(50000.0, "Starting Balance ($)", group = gApex)
 trailDD   = input.float(2000.0,  "Trailing Drawdown ($)", group = gApex)
 ddLock    = input.float(2100.0,  "Trailing Lock Profit ($)", group = gApex)
 riskTrade = input.float(400.0,   "Max $ Risk / Trade", minval = 25.0, group = gApex)
 maxCon    = input.int(20,        "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = gApex)
+ovrPV     = input.float(0.0,     "Override $/Point (0 = auto)", minval = 0.0, group = gApex)
 
 gVis      = "Visuals"
-showBars  = input.bool(true,  "Color Bars by Delta", group = gVis)
-showCVD   = input.bool(true,  "Plot Session CVD (scaled)", group = gVis)
-showTrade = input.bool(true,  "Draw Active Trade", group = gVis)
-showTable = input.bool(true,  "Show Risk Table", group = gVis)
+showBars  = input.bool(true, "Color Bars by Delta", group = gVis)
+showCVD   = input.bool(true, "Plot Session CVD (scaled)", group = gVis)
+showTrade = input.bool(true, "Draw Active Trade", group = gVis)
+showTable = input.bool(true, "Show Risk Table", group = gVis)
 
-// ============================== INSTRUMENT MAP ===============================
-dpp = sym == "MES" ? 5.0 : sym == "MNQ" ? 2.0 : sym == "MGC" ? 10.0 : sym == "MCL" ? 100.0 : sym == "ES" ? 50.0 : sym == "NQ" ? 20.0 : sym == "GC" ? 100.0 : sym == "CL" ? 1000.0 : 1.0
-ts  = sym == "MES" or sym == "MNQ" or sym == "ES" or sym == "NQ" ? 0.25 : sym == "MGC" or sym == "GC" ? 0.10 : sym == "MCL" or sym == "CL" ? 0.01 : syminfo.mintick
+// ============================== POINT VALUE (auto) ===========================
+dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
 
 // ============================== SESSION ======================================
 inSess    = not na(time(timeframe.period, sessRTH, "America/New_York"))
@@ -73,9 +77,7 @@ if isNewSess
 else if inOR
     orH := math.max(nz(orH, high), high)
     orL := math.min(nz(orL, low),  low)
-orReady   = inSess and sessBar >= orBars
-brokeORHi = orReady and close > orH
-brokeORLo = orReady and close < orL
+orReady = inSess and sessBar >= orBars
 
 vwap      = ta.vwap(hlc3, isNewSess)
 aboveVwap = inSess and close > vwap
@@ -83,7 +85,7 @@ belowVwap = inSess and close < vwap
 
 atr = ta.atr(atrLen)
 
-// ============================== DELTA / CVD ==================================
+// ============================== ORDERFLOW ====================================
 f_autoLTF() =>
     tf = timeframe.in_seconds(timeframe.period)
     switch
@@ -117,7 +119,6 @@ deltaPct = totalVol > 0 ? delta / totalVol : 0.0
 var float cvd = 0.0
 cvd := isNewSess ? delta : nz(cvd[1]) + delta
 
-// ============================== TRIGGERS / CONFIRM / VETO ====================
 isBuyImb  = buyVol  > sellVol * imbThresh
 isSellImb = sellVol > buyVol  * imbThresh
 var int buyStreak  = 0
@@ -134,18 +135,28 @@ tightR = (high - low) < avgRng * 0.5
 absorbBuy  = heavyV and tightR and delta > 0 and close >= high - (high - low) * 0.30
 absorbSell = heavyV and tightR and delta < 0 and close <= low  + (high - low) * 0.30
 
-strongUp = deltaPct >  strongDel
-strongDn = deltaPct < -strongDel
+ofLong  = stackedBuy  or absorbBuy  or deltaPct >  strongDel
+ofShort = stackedSell or absorbSell or deltaPct < -strongDel
 
-triggerLong  = stackedBuy  or absorbBuy  or strongUp
-triggerShort = stackedSell or absorbSell or strongDn
-confirmLong  = brokeORHi or cvd > 0
-confirmShort = brokeORLo or cvd < 0
-vwapOKLong   = not useVwap or aboveVwap
-vwapOKShort  = not useVwap or belowVwap
+// ============================== TRIGGERS =====================================
+brokeHi    = orReady and not na(orH) and close > orH
+brokeLo    = orReady and not na(orL) and close < orL
+firstBrkUp = brokeHi and not brokeHi[1]
+firstBrkDn = brokeLo and not brokeLo[1]
 
-rawLong  = inSess and orReady and not flatNow and triggerLong  and confirmLong  and vwapOKLong
-rawShort = inSess and orReady and not flatNow and triggerShort and confirmShort and vwapOKShort
+orTrigLong   = useORBrk and firstBrkUp and (not useOFConf or ofLong)
+orTrigShort  = useORBrk and firstBrkDn and (not useOFConf or ofShort)
+ofTrigLong   = useOFTrig and ofLong  and orReady
+ofTrigShort  = useOFTrig and ofShort and orReady
+
+triggerLong  = orTrigLong  or ofTrigLong
+triggerShort = orTrigShort or ofTrigShort
+
+vetoLong  = not useVwap or aboveVwap
+vetoShort = not useVwap or belowVwap
+
+rawLong  = inSess and not flatNow and triggerLong  and vetoLong
+rawShort = inSess and not flatNow and triggerShort and vetoShort
 
 var int lastSig = -1000
 canFire = bar_index - lastSig >= cooldown
@@ -207,13 +218,12 @@ if fireShort
         tBar   := bar_index
         lastSig := bar_index
 
-// Position size for the active trade.
-rPC      = na(tRdist) ? na : tRdist * dpp
-sizeAct  = na(rPC) or rPC <= 0 ? 0 : math.max(1, math.min(maxCon, math.floor(riskTrade / rPC)))
+rPC = na(tRdist) ? na : tRdist * dpp
+sizeAct = na(rPC) or rPC <= 0 ? 0 : math.max(1, math.min(maxCon, math.floor(riskTrade / rPC)))
 if (fireLong or fireShort) and sizeAct > 0
     tSize := sizeAct
 
-// Live preview size for when no trade is open.
+// LIVE PREVIEW
 liveLongSL  = math.min(close - atr * slATR, swingLow  - syminfo.mintick * 2)
 liveShortSL = math.max(close + atr * slATR, swingHigh + syminfo.mintick * 2)
 liveBias    = aboveVwap ? 1 : belowVwap ? -1 : 0
@@ -229,13 +239,13 @@ if hitStop or hitTP3 or sessEnd or (tDir != 0 and flatNow)
     tDir := 0
 
 // ============================== DRAW TRADE LINES =============================
-var line  lnE = na
-var line  lnS = na
+var line  lnE  = na
+var line  lnS  = na
 var line  lnT1 = na
 var line  lnT2 = na
 var line  lnT3 = na
-var label lbE = na
-var label lbS = na
+var label lbE  = na
+var label lbS  = na
 var label lbT1 = na
 var label lbT2 = na
 var label lbT3 = na
@@ -317,13 +327,13 @@ if showTable and barstate.islast
     bL = color.new(color.silver, 30)
     bV = color.new(color.white,  0)
     table.cell(t, 0, 0, "APX-OF",                            bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 0, sym + " | LTF " + ltfRes,            bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 0, syminfo.ticker + " | $" + str.tostring(dpp, "#.##") + "/pt", bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
     table.cell(t, 0, 1, "Trigger L/S",  bgcolor = bL, text_color = color.black, text_size = size.tiny)
     table.cell(t, 1, 1, (triggerLong ? "Y" : "N") + " / " + (triggerShort ? "Y" : "N"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
-    table.cell(t, 0, 2, "Confirm L/S",  bgcolor = bL, text_color = color.black, text_size = size.tiny)
-    table.cell(t, 1, 2, (confirmLong ? "Y" : "N") + " / " + (confirmShort ? "Y" : "N"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 0, 2, "OF L/S",       bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 2, (ofLong ? "Y" : "N") + " / " + (ofShort ? "Y" : "N"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
     table.cell(t, 0, 3, "VWAP veto",    bgcolor = bL, text_color = color.black, text_size = size.tiny)
-    table.cell(t, 1, 3, (vwapOKLong ? "L=Y" : "L=N") + " " + (vwapOKShort ? "S=Y" : "S=N"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 3, (vetoLong ? "L=Y" : "L=N") + " " + (vetoShort ? "S=Y" : "S=N"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
     table.cell(t, 0, 4, "Sess CVD",     bgcolor = bL, text_color = color.black, text_size = size.tiny)
     table.cell(t, 1, 4, str.tostring(cvd, "#"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
     table.cell(t, 0, 5, "Trade",        bgcolor = bL, text_color = color.black, text_size = size.tiny)
