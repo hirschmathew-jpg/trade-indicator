@@ -17,17 +17,18 @@ usePull   = input.bool(true,  "2. VWAP Pullback", group = gPat)
 useOFTrig = input.bool(false, "3. Pure Orderflow Triggers", group = gPat)
 
 gFilt     = "Filters"
-useHTFBias  = input.bool(true,  "HTF Bias Filter (15m EMA50)", group = gFilt)
-htfTF       = input.timeframe("15", "HTF Timeframe", group = gFilt)
+useHTFBias  = input.bool(true,  "HTF Bias (price + slope)", group = gFilt, tooltip = "Long needs HTF close > EMA AND EMA rising; short needs the inverse. Prevents shorting bull pullbacks.")
+htfTF       = input.timeframe("60", "HTF Timeframe", group = gFilt)
 htfEmaLen   = input.int(50,    "HTF EMA Length",      group = gFilt)
+htfSlopeBars= input.int(3,     "HTF Slope Lookback Bars", minval = 1, maxval = 10, group = gFilt)
 useVwap     = input.bool(true, "VWAP Veto",            group = gFilt)
 useTimeFilt = input.bool(true, "Time-of-Day Filter",   group = gFilt)
-skipFirstMin= input.int(15,    "Skip First N Min",     minval = 0, group = gFilt)
-skipLunch   = input.bool(true, "Skip Lunch (12-13:30 NY)", group = gFilt)
-skipLastMin = input.int(30,    "Skip Last N Min",      minval = 0, group = gFilt)
+skipFirstMin= input.int(10,    "Skip First N Min",     minval = 0, group = gFilt)
+skipLunch   = input.bool(false,"Skip Lunch (12-13:30 NY)", group = gFilt)
+skipLastMin = input.int(15,    "Skip Last N Min",      minval = 0, group = gFilt)
 useVolReg   = input.bool(true, "Volatility Regime Filter", group = gFilt)
-atrMin      = input.float(0.5, "ATR Floor (vs avg)",   minval = 0.1, step = 0.05, group = gFilt)
-atrMax      = input.float(2.5, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gFilt)
+atrMin      = input.float(0.3, "ATR Floor (vs avg)",   minval = 0.1, step = 0.05, group = gFilt)
+atrMax      = input.float(3.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gFilt)
 
 gSig      = "Signal Tweaks"
 brkMinRng = input.float(0.5,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
@@ -56,7 +57,7 @@ atrLen    = input.int(14,    "ATR Length", group = gRisk)
 tp1R      = input.float(1.0, "TP1 R", group = gRisk)
 tp2R      = input.float(2.0, "TP2 R", group = gRisk)
 tp3R      = input.float(4.0, "TP3 R", group = gRisk)
-cooldown  = input.int(5,     "Cooldown Bars", minval = 0, group = gRisk)
+cooldown  = input.int(3,     "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k"
 acctStart = input.float(50000.0, "Starting Balance ($)", group = gApex)
@@ -104,11 +105,14 @@ belowVwap = inSess and close < vwap
 
 atr = ta.atr(atrLen)
 
-// ============================== HTF BIAS =====================================
-htfClose = request.security(syminfo.tickerid, htfTF, close, lookahead = barmerge.lookahead_off)
-htfEMA   = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen), lookahead = barmerge.lookahead_off)
-htfBull  = not na(htfEMA) and htfClose > htfEMA
-htfBear  = not na(htfEMA) and htfClose < htfEMA
+// ============================== HTF BIAS (price + slope) =====================
+htfClose    = request.security(syminfo.tickerid, htfTF, close, lookahead = barmerge.lookahead_off)
+htfEMA      = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen), lookahead = barmerge.lookahead_off)
+htfEMAprev  = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen)[htfSlopeBars], lookahead = barmerge.lookahead_off)
+emaRising   = not na(htfEMA) and not na(htfEMAprev) and htfEMA > htfEMAprev
+emaFalling  = not na(htfEMA) and not na(htfEMAprev) and htfEMA < htfEMAprev
+htfBull     = not na(htfEMA) and htfClose > htfEMA and emaRising
+htfBear     = not na(htfEMA) and htfClose < htfEMA and emaFalling
 
 // ============================== TIME-OF-DAY ==================================
 nyHr  = hour(time, "America/New_York")
