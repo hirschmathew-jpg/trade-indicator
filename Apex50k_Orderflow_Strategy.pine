@@ -38,14 +38,15 @@ absorbRange = input.float(0.45, "Absorption Range Frac", minval = 0.05, maxval =
 
 grpSess     = "Session Anchors (intraday only)"
 sessRTH     = input.session("0930-1600", "RTH Session (NY)", group = grpSess)
-orMin       = input.int(15, "Opening Range Minutes", minval = 5, maxval = 60, group = grpSess, tooltip = "First X minutes after RTH open define the opening range used for bias.")
-useORBias   = input.bool(true, "Require Opening-Range Bias", group = grpSess, tooltip = "Longs only above OR mid, shorts only below.")
-useVwapF    = input.bool(true, "Require Session VWAP Side", group = grpSess)
+orMin       = input.int(10, "Opening Range Minutes", minval = 5, maxval = 60, group = grpSess, tooltip = "First X minutes after RTH open define the opening range used for bias.")
+useORBias   = input.bool(true, "Score Opening-Range Bias", group = grpSess, tooltip = "When ON, adds +1 to score when price is on the right side of OR mid.")
+useVwapF    = input.bool(true, "Score Session VWAP Side", group = grpSess, tooltip = "When ON, adds +1 to score when price is on the right side of VWAP.")
+strictBias  = input.bool(false, "Strict Bias (HARD veto)", group = grpSess, tooltip = "When ON, NO long signal unless above BOTH VWAP and OR mid (and inverse for shorts). When OFF, both filters are scoring-only - the strategy will trade against VWAP/OR if other orderflow conditions are strong enough.")
 flatBy      = input.session("1555-1600", "Force-Flat Window (NY)", group = grpSess)
 
 grpScore    = "Confluence Scoring"
-minScore    = input.int(3, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore)
-cooldownBars= input.int(3, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
+minScore    = input.int(2, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore, tooltip = "Lower = more trades. Try 2 for active trading, 4 for high-conviction only.")
+cooldownBars= input.int(2, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
 
 grpRisk     = "SL / TP Engine"
 slMode      = input.string("ATR + Swing", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = grpRisk)
@@ -222,9 +223,9 @@ shortScore += (not useVwapF)  or belowVwap ? 1 : 0
 shortScore += (not useORBias) or orBiasDn  ? 1 : 0
 shortScore += brokeORLo         ? 1 : 0
 
-// Hard veto: if filter is on and it disagrees, kill that side entirely.
-longOK  = (not useVwapF  or aboveVwap) and (not useORBias or orBiasUp)
-shortOK = (not useVwapF  or belowVwap) and (not useORBias or orBiasDn)
+// Hard veto only when strictBias is ON. Otherwise filters are scoring-only.
+longOK  = not strictBias or ((not useVwapF or aboveVwap) and (not useORBias or orBiasUp))
+shortOK = not strictBias or ((not useVwapF or belowVwap) and (not useORBias or orBiasDn))
 
 rawLong  = inSession and orReady and longOK  and longScore  >= minScore
 rawShort = inSession and orReady and shortOK and shortScore >= minScore
@@ -351,10 +352,34 @@ if aDir == -1 and strategy.position_size < 0 and bar_index > lastSig
     strategy.exit("S-TP3", from_entry = "S",            limit = aTP3, stop = dynStop)
 
 // ============================== VISUALS ======================================
+showScore = input.bool(false, "DEBUG: show L/S score on every bar", group = "Visuals", tooltip = "Prints small numbers above/below each bar so you can see why signals don't fire.")
+
 plot(inSession ? vwap : na, "Session VWAP", color = color.new(color.yellow, 0), linewidth = 2)
 plot(inSession ? orH  : na, "OR High",      color = color.new(color.aqua,    0), style = plot.style_linebr)
 plot(inSession ? orL  : na, "OR Low",       color = color.new(color.aqua,    0), style = plot.style_linebr)
 plot(inSession ? orMid: na, "OR Mid",       color = color.new(color.gray,   30), style = plot.style_linebr)
 plotshape(rawLong  and strategy.position_size == 0, "OF LONG",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.small)
 plotshape(rawShort and strategy.position_size == 0, "OF SHORT", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.small)
+plotchar(showScore and inSession and orReady ? longScore  : na, "LongScore",  str.tostring(longScore),  location.belowbar, color = color.new(color.green, 30), size = size.tiny)
+plotchar(showScore and inSession and orReady ? shortScore : na, "ShortScore", str.tostring(shortScore), location.abovebar, color = color.new(color.red,   30), size = size.tiny)
 bgcolor(inSession ? na : color.new(color.gray, 92), title = "Outside Session")
+
+// Diagnostics table - tells you WHY you're not getting trades.
+if barstate.islast
+    var table dbg = table.new(position.bottom_right, 2, 8, border_width = 1, border_color = color.new(color.gray, 70))
+    table.cell(dbg, 0, 0, "STRATEGY DIAG", bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+    table.cell(dbg, 1, 0, str.tostring(strategy.closedtrades) + " trades", bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+    table.cell(dbg, 0, 1, "In RTH session", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 1, inSession ? "YES" : "NO", text_color = inSession ? color.green : color.red, text_size = size.tiny, bgcolor = color.new(color.white, 0))
+    table.cell(dbg, 0, 2, "OR ready", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 2, orReady ? "YES" : "NO (need " + str.tostring(orBars) + " bars)", text_color = orReady ? color.green : color.red, text_size = size.tiny, bgcolor = color.new(color.white, 0))
+    table.cell(dbg, 0, 3, "Long score / min", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 3, str.tostring(longScore) + " / " + str.tostring(minScore), text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.white, 0))
+    table.cell(dbg, 0, 4, "Short score / min", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 4, str.tostring(shortScore) + " / " + str.tostring(minScore), text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.white, 0))
+    table.cell(dbg, 0, 5, "Long veto OK", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 5, longOK ? "OK" : "BLOCKED", text_color = longOK ? color.green : color.red, text_size = size.tiny, bgcolor = color.new(color.white, 0))
+    table.cell(dbg, 0, 6, "Short veto OK", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 6, shortOK ? "OK" : "BLOCKED", text_color = shortOK ? color.green : color.red, text_size = size.tiny, bgcolor = color.new(color.white, 0))
+    table.cell(dbg, 0, 7, "Cooldown clear", text_color = color.black, text_size = size.tiny, bgcolor = color.new(color.silver, 60))
+    table.cell(dbg, 1, 7, canFire ? "YES" : "NO", text_color = canFire ? color.green : color.red, text_size = size.tiny, bgcolor = color.new(color.white, 0))

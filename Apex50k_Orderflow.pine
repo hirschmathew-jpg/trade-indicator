@@ -24,14 +24,15 @@ absorbRange = input.float(0.45, "Absorption Range Frac", minval = 0.05, maxval =
 
 grpSess     = "Session Anchors (intraday only)"
 sessRTH     = input.session("0930-1600", "RTH Session (NY)", group = grpSess)
-orMin       = input.int(15, "Opening Range Minutes", minval = 5, maxval = 60, group = grpSess)
-useORBias   = input.bool(true, "Require Opening-Range Bias", group = grpSess)
-useVwapF    = input.bool(true, "Require Session VWAP Side", group = grpSess)
+orMin       = input.int(10, "Opening Range Minutes", minval = 5, maxval = 60, group = grpSess)
+useORBias   = input.bool(true, "Score Opening-Range Bias", group = grpSess)
+useVwapF    = input.bool(true, "Score Session VWAP Side", group = grpSess)
+strictBias  = input.bool(false, "Strict Bias (HARD veto)", group = grpSess, tooltip = "When ON, NO long unless above BOTH VWAP and OR mid (and inverse). When OFF, both filters are scoring-only.")
 flatBy      = input.session("1555-1600", "Force-Flat Window (NY)", group = grpSess)
 
 grpScore    = "Confluence Scoring"
-minScore    = input.int(3, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore)
-cooldownBars= input.int(3, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
+minScore    = input.int(2, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore, tooltip = "Lower = more signals. Try 2 for active trading, 4 for high-conviction only.")
+cooldownBars= input.int(2, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
 
 grpRisk     = "SL / TP Engine"
 slMode      = input.string("ATR + Swing", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = grpRisk)
@@ -217,8 +218,9 @@ shortScore += (not useVwapF)  or belowVwap ? 1 : 0
 shortScore += (not useORBias) or orBiasDn  ? 1 : 0
 shortScore += brokeORLo         ? 1 : 0
 
-longOK  = (not useVwapF or aboveVwap) and (not useORBias or orBiasUp)
-shortOK = (not useVwapF or belowVwap) and (not useORBias or orBiasDn)
+// Hard veto only when strictBias is ON. Otherwise filters are scoring-only.
+longOK  = not strictBias or ((not useVwapF or aboveVwap) and (not useORBias or orBiasUp))
+shortOK = not strictBias or ((not useVwapF or belowVwap) and (not useORBias or orBiasDn))
 
 rawLong  = inSession and orReady and longOK  and longScore  >= minScore and not flatNow
 rawShort = inSession and orReady and shortOK and shortScore >= minScore and not flatNow
