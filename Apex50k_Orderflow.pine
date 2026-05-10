@@ -30,7 +30,10 @@ vwapBuffer = input.float(0.0, "VWAP Buffer (ATR fraction)", minval = 0.0, step =
 allowBuy   = input.bool(true, "Show BUY signals", group = "Filter")
 allowSell  = input.bool(true, "Show SELL signals", group = "Filter")
 minTier    = input.int(2, "Minimum signal tier (1=A+, 2=A, 3=B)", minval = 1, maxval = 3, group = "Filter", tooltip = "1 = only A+. 2 = A+ and A (default). 3 = all including B markers.")
-cooldownBars = input.int(10, "Cooldown bars between same-direction signals", minval = 0, group = "Filter", tooltip = "Prevents signal spam when orderflow conditions hold across many bars. 10 bars on 3m = 30 minutes.")
+cooldownBars = input.int(10, "Cooldown bars between same-direction signals", minval = 0, group = "Filter", tooltip = "Prevents signal spam when orderflow conditions hold across many bars.")
+
+tradeSession = input.session("0000-1700,1800-2400", "Trading Session (NY time)", group = "Session", tooltip = "When the indicator fires signals. Defaults to all CME hours. Examples: '0930-1600' = NY RTH only. '1800-0300' = Asia. '0300-0930' = London. '0000-2400' = 24/7 crypto.")
+sessTZ       = input.string("America/New_York", "Session Timezone", options = ["America/New_York","America/Chicago","Europe/London","Asia/Tokyo","UTC","Australia/Sydney"], group = "Session")
 
 slATR      = input.float(1.0, "Stop = N x ATR", minval = 0.3, step = 0.1, group = "Risk / SL / TP", tooltip = "Stop loss = N times ATR away from entry. 1.0 = aggressive, 1.5 = conservative.")
 tp1R       = input.float(1.0, "TP1 (R-multiple)", minval = 0.3, step = 0.1, group = "Risk / SL / TP", tooltip = "First target as multiple of risk. 1.0 = same distance as stop.")
@@ -81,8 +84,8 @@ totalVol = buyVol + sellVol
 deltaPct = totalVol > 0 ? delta / totalVol : 0.0
 
 // ============================== SESSION VWAP + CVD ===========================
-inRTH    = not na(time(timeframe.period, "0930-1600", "America/New_York"))
-sessFlag = inRTH ? 1 : 0
+inSess    = not na(time(timeframe.period, tradeSession, sessTZ))
+sessFlag = inSess ? 1 : 0
 isNewSess = ta.change(sessFlag) > 0
 
 var float cvd = 0.0
@@ -94,8 +97,8 @@ cvdFalling = not isNewSess and cvd < nz(cvd[cvdLook])
 vwap      = ta.vwap(hlc3, isNewSess)
 atr14     = ta.atr(14)
 // VWAP filter with optional ATR buffer.
-aboveVwap = inRTH and close > vwap - atr14 * vwapBuffer
-belowVwap = inRTH and close < vwap + atr14 * vwapBuffer
+aboveVwap = inSess and close > vwap - atr14 * vwapBuffer
+belowVwap = inSess and close < vwap + atr14 * vwapBuffer
 
 // ============================== ORDERFLOW SIGNALS ============================
 // Stacked imbalance: 2+ consecutive one-sided bars.
@@ -176,9 +179,9 @@ cMax = ta.highest(cvd, 200)
 pMin = ta.lowest(low,  200)
 pMax = ta.highest(high, 200)
 cvdScaled = cMax - cMin > 0 ? pMin + (cvd - cMin) / (cMax - cMin) * (pMax - pMin) : na
-plot(showCVD and inRTH ? cvdScaled : na, "Sess CVD", color = color.new(color.orange, 0), linewidth = 2)
+plot(showCVD and inSess ? cvdScaled : na, "Sess CVD", color = color.new(color.orange, 0), linewidth = 2)
 
-plot(showVWAP and inRTH ? vwap : na, "VWAP", color = color.new(color.yellow, 0), linewidth = 2)
+plot(showVWAP and inSess ? vwap : na, "VWAP", color = color.new(color.yellow, 0), linewidth = 2)
 
 // Tier 1 (A+): HUGE label + arrow + bright background flash
 plotshape(fireBuyT1,  "BUY A+",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY A+",  textcolor = color.white, size = size.huge)
@@ -202,7 +205,7 @@ bgcolor(fireBuyT2  ? color.new(color.lime,  80)   : na, title = "BUY flash")
 bgcolor(fireSellT1 ? color.new(color.red,   70)   : na, title = "SELL A+ flash")
 bgcolor(fireSellT2 ? color.new(color.fuchsia, 80) : na, title = "SELL flash")
 
-bgcolor(inRTH ? na : color.new(color.gray, 92), title = "Outside RTH")
+bgcolor(inSess ? na : color.new(color.gray, 92), title = "Outside Session")
 
 // ============================== ENTRY / SL / TP DRAWING ======================
 // When a Tier 1 or Tier 2 BUY/SELL fires, calculate entry, stop, three targets,
