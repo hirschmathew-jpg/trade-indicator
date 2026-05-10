@@ -95,13 +95,15 @@ maxCon    = input.int(20,      "Max Contracts (Apex Cap)", minval = 1, maxval = 
 ovrPV     = input.float(0.0,   "Override $/Point (0 = auto)", minval = 0.0, group = gApex)
 
 gProt     = "Apex DD Protection"
-trailDD       = input.float(2000.0, "Trailing Drawdown ($)",     group = gProt)
+trailDD       = input.float(2000.0, "Account Trailing DD ($)",   group = gProt, tooltip = "Apex account-level trail. Strategy halts new entries when equity is within HaltCushion of this floor.")
 ddLockProf    = input.float(2100.0, "Trail Lock Profit ($)",     group = gProt)
 useDailyHalt  = input.bool(true,    "Halt on Daily Loss",        group = gProt)
 maxDailyLoss  = input.float(800.0,  "Max Daily Loss ($)",        minval = 50, group = gProt)
 useCushionHalt= input.bool(true,    "Halt on Low Cushion",       group = gProt)
 trailCushion  = input.float(500.0,  "Halt Cushion ($)",          minval = 0, group = gProt)
 useScaleDown  = input.bool(true,    "Scale Down Size at 2x Cushion", group = gProt)
+useIntraTrail = input.bool(true,    "Intraday Peak Trail Halt",  group = gProt, tooltip = "Halt new entries AND close any open trade if today's equity drops by Intraday Trail \$ from today's peak. Stops 'giving back' winning days.")
+intraTrail    = input.float(400.0,  "Intraday Peak Trail ($)",   minval = 50, group = gProt, tooltip = "Max acceptable drawdown from today's peak equity before halting. \$400 default = stops a winning day from turning into a losing day.")
 
 // ============================== POINT VALUE ==================================
 dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
@@ -259,21 +261,35 @@ var int lastSig = -1000
 canFire = bar_index - lastSig >= cooldown
 
 // ============================== APEX PROTECTION ==============================
+// Day-start equity (resets at session open).
 var float dayStartEq = na
 if isNewSess
     dayStartEq := strategy.equity
 dayPnL = strategy.equity - nz(dayStartEq, strategy.initial_capital)
 
+// Intraday peak equity (resets at session open) + drawdown-from-peak tracking.
+var float dayPeakEq = na
+if isNewSess
+    dayPeakEq := strategy.equity
+else
+    dayPeakEq := math.max(nz(dayPeakEq, strategy.equity), strategy.equity)
+intraDD = nz(dayPeakEq, strategy.equity) - strategy.equity
+
+// Account-wide peak (Apex trail floor).
 var float peakEq = strategy.initial_capital
 peakEq := math.max(peakEq, strategy.equity)
-
 peakForTrail = math.min(peakEq, strategy.initial_capital + ddLockProf)
 trailFloor   = peakForTrail - trailDD
 cushion      = strategy.equity - trailFloor
 
-dailyHalt   = useDailyHalt and dayPnL <= -maxDailyLoss
-cushionHalt = useCushionHalt and cushion < trailCushion
-canTrade    = not dailyHalt and not cushionHalt
+dailyHalt    = useDailyHalt   and dayPnL  <= -maxDailyLoss
+cushionHalt  = useCushionHalt and cushion <  trailCushion
+intraHalt    = useIntraTrail  and intraDD >= intraTrail
+canTrade     = not dailyHalt and not cushionHalt and not intraHalt
+
+// CLOSE the open position when intraday-trail breaches (gives back gains).
+if intraHalt and strategy.position_size != 0
+    strategy.close_all(comment = "IntraTrail halt")
 
 sizeScale = useScaleDown and cushion < trailCushion * 2.0 ? 0.5 : 1.0
 
@@ -434,12 +450,12 @@ if barstate.islast
     table.cell(dbg, 0, 2, "Cushion",      bgcolor = bgL, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 1, 2, "$" + str.tostring(cushion, "#.##"), bgcolor = bgV, text_color = cushion < trailCushion ? color.red : cushion < trailCushion * 2 ? color.orange : color.green, text_size = size.tiny)
     table.cell(dbg, 0, 3, "Day PnL",      bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 3, "$" + str.tostring(dayPnL, "#.##"), bgcolor = bgV, text_color = dayPnL >= 0 ? color.green : color.red, text_size = size.tiny)
+    table.cell(dbg, 1, 3, "$" + str.tostring(dayPnL, "#.##") + "  (peak: $" + str.tostring(nz(dayPeakEq - strategy.initial_capital, 0), "#.##") + ", DD: $" + str.tostring(intraDD, "#.##") + ")", bgcolor = bgV, text_color = dayPnL >= 0 ? color.green : color.red, text_size = size.tiny)
     table.cell(dbg, 0, 4, "$/pt",         bgcolor = bgL, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 1, 4, "$" + str.tostring(dpp, "#.##"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 0, 5, "Size scale",   bgcolor = bgL, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 1, 5, str.tostring(sizeScale * 100, "#") + "%", bgcolor = bgV, text_color = sizeScale < 1.0 ? color.orange : color.black, text_size = size.tiny)
-    haltStr = dailyHalt ? "DAILY-LOSS" : cushionHalt ? "CUSHION" : flatNow ? "EOD WINDOW" : "OK"
+    haltStr = dailyHalt ? "DAILY-LOSS" : cushionHalt ? "CUSHION" : intraHalt ? "INTRA-TRAIL" : flatNow ? "EOD WINDOW" : "OK"
     table.cell(dbg, 0, 6, "Halt",         bgcolor = bgL, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 1, 6, haltStr, bgcolor = bgV, text_color = haltStr == "OK" ? color.green : color.red, text_size = size.tiny)
     table.cell(dbg, 0, 7, "HTF bias",     bgcolor = bgL, text_color = color.black, text_size = size.tiny)

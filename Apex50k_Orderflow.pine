@@ -61,11 +61,13 @@ cooldown  = input.int(3,     "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k"
 acctStart = input.float(50000.0, "Starting Balance ($)", group = gApex)
-trailDD   = input.float(2000.0,  "Trailing Drawdown ($)", group = gApex)
+trailDD   = input.float(2000.0,  "Account Trailing DD ($)", group = gApex)
 ddLock    = input.float(2100.0,  "Trailing Lock Profit ($)", group = gApex)
 riskTrade = input.float(400.0,   "Max $ Risk / Trade", minval = 25.0, group = gApex)
 maxCon    = input.int(20,        "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = gApex)
 ovrPV     = input.float(0.0,     "Override $/Point (0 = auto)", minval = 0.0, group = gApex)
+useIntraTrail = input.bool(true, "Intraday Peak Trail Halt",  group = gApex, tooltip = "Block new BUY/SELL signals if today's simulated equity drops by Intraday Trail \$ from today's peak.")
+intraTrail    = input.float(400.0, "Intraday Peak Trail ($)", minval = 50, group = gApex)
 
 gVis      = "Visuals"
 showBars  = input.bool(true, "Color Bars by Delta", group = gVis)
@@ -216,8 +218,20 @@ rawShort = allowShort and inSess and not flatNow and triggerShort and allFilters
 
 var int lastSig = -1000
 canFire = bar_index - lastSig >= cooldown
-fireLong  = rawLong  and canFire
-fireShort = rawShort and canFire and not fireLong
+// Intraday-trail halt suppresses new signals (calculated again here from
+// the simulated equity above for indicator-only use).
+sessOpen_e   = ta.valuewhen(isNewSess, open, 0)
+floatPnL_e   = (close - sessOpen_e) * dpp * math.max(tSize, 1)
+simEq_e      = acctStart + floatPnL_e
+var float dayPeakSim_e = na
+if isNewSess
+    dayPeakSim_e := simEq_e
+else
+    dayPeakSim_e := math.max(nz(dayPeakSim_e, simEq_e), simEq_e)
+intraHalted_e = useIntraTrail and (nz(dayPeakSim_e, simEq_e) - simEq_e) >= intraTrail
+
+fireLong  = rawLong  and canFire and not intraHalted_e
+fireShort = rawShort and canFire and not fireLong and not intraHalted_e
 
 // ============================== SL / TP ======================================
 swingLow  = ta.lowest(low,   math.min(swingLen, math.max(2, sessBar + 1)))
@@ -381,13 +395,25 @@ alertcondition(fireShort, "SELL", "{{ticker}} SELL Entry={{close}}")
 // ============================== RISK TABLE ===================================
 sessOpen = ta.valuewhen(isNewSess, open, 0)
 floatPnL = (close - sessOpen) * dpp * math.max(tSize, 1)
-peakEq   = ta.highest(acctStart + floatPnL, 1000)
+simEq    = acctStart + floatPnL
+
+// Account-trail floor (Apex).
+peakEq   = ta.highest(simEq, 1000)
 peakClp  = math.min(peakEq, acctStart + ddLock)
 ddCap    = peakClp - trailDD
-cushion  = (acctStart + floatPnL) - ddCap
+cushion  = simEq - ddCap
+
+// Intraday peak trail tracking (resets each session).
+var float dayPeakSim = na
+if isNewSess
+    dayPeakSim := simEq
+else
+    dayPeakSim := math.max(nz(dayPeakSim, simEq), simEq)
+intraDD     = nz(dayPeakSim, simEq) - simEq
+intraHalted = useIntraTrail and intraDD >= intraTrail
 
 if showTable and barstate.islast
-    var table t = table.new(position.top_right, 2, 13, border_width = 1)
+    var table t = table.new(position.top_right, 2, 14, border_width = 1)
     bL = color.new(color.silver, 30)
     bV = color.new(color.white,  0)
     table.cell(t, 0, 0, "APX-OF v2",                          bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
@@ -422,3 +448,6 @@ if showTable and barstate.islast
     table.cell(t, 1, 11, "$" + str.tostring(ddCap, "#.##"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
     table.cell(t, 0, 12, "Cushion",      bgcolor = bL, text_color = color.black, text_size = size.tiny)
     table.cell(t, 1, 12, "$" + str.tostring(cushion, "#.##"), bgcolor = bV, text_color = cushion < 500 ? color.red : cushion < 1000 ? color.orange : color.green, text_size = size.tiny)
+    if useIntraTrail
+        table.cell(t, 0, 13, "Intraday DD",  bgcolor = bL, text_color = color.black, text_size = size.tiny)
+        table.cell(t, 1, 13, "$" + str.tostring(intraDD, "#.##") + " / $" + str.tostring(intraTrail, "#.##") + (intraHalted ? "  HALT" : ""), bgcolor = bV, text_color = intraHalted ? color.red : intraDD > intraTrail * 0.7 ? color.orange : color.green, text_size = size.tiny)
