@@ -29,7 +29,17 @@ useVwap    = input.bool(true, "Buys above VWAP only / Sells below", group = "Fil
 vwapBuffer = input.float(0.0, "VWAP Buffer (ATR fraction)", minval = 0.0, step = 0.1, group = "Filter", tooltip = "Allows buys when within this ATR distance below VWAP. 0 = strict.")
 allowBuy   = input.bool(true, "Show BUY signals", group = "Filter")
 allowSell  = input.bool(true, "Show SELL signals", group = "Filter")
-minTier    = input.int(3, "Minimum signal tier (1=A+, 2=A, 3=B)", minval = 1, maxval = 3, group = "Filter", tooltip = "1 = only A+. 2 = A+ and A. 3 = all including B markers (default).")
+minTier    = input.int(2, "Minimum signal tier (1=A+, 2=A, 3=B)", minval = 1, maxval = 3, group = "Filter", tooltip = "1 = only A+. 2 = A+ and A (default). 3 = all including B markers.")
+cooldownBars = input.int(10, "Cooldown bars between same-direction signals", minval = 0, group = "Filter", tooltip = "Prevents signal spam when orderflow conditions hold across many bars. 10 bars on 3m = 30 minutes.")
+
+slATR      = input.float(1.0, "Stop = N x ATR", minval = 0.3, step = 0.1, group = "Risk / SL / TP", tooltip = "Stop loss = N times ATR away from entry. 1.0 = aggressive, 1.5 = conservative.")
+tp1R       = input.float(1.0, "TP1 (R-multiple)", minval = 0.3, step = 0.1, group = "Risk / SL / TP", tooltip = "First target as multiple of risk. 1.0 = same distance as stop.")
+tp2R       = input.float(2.0, "TP2 (R-multiple)", minval = 0.5, step = 0.1, group = "Risk / SL / TP")
+tp3R       = input.float(3.0, "TP3 (R-multiple)", minval = 1.0, step = 0.1, group = "Risk / SL / TP")
+riskTrade  = input.float(400.0, "Max $ Risk / Trade", minval = 25.0, group = "Risk / SL / TP")
+maxCon     = input.int(20,      "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = "Risk / SL / TP")
+ovrPV      = input.float(0.0,   "Override $/Point (0 = auto)", minval = 0.0, group = "Risk / SL / TP", tooltip = "Auto = use chart's built-in point value (correct for MNQ, NQ, MES, ES, etc.).")
+showSLTP   = input.bool(true, "Draw entry / SL / TP lines", group = "Risk / SL / TP")
 
 showBars   = input.bool(true, "Color bars by delta strength", group = "Visuals")
 showCVD    = input.bool(true, "Plot session CVD overlay",     group = "Visuals")
@@ -125,16 +135,36 @@ sellT3 = strongDn and cvdFalling and not sellT1 and not sellT2
 vwapOKBuy  = not useVwap or aboveVwap
 vwapOKSell = not useVwap or belowVwap
 
-// Apply min tier and direction toggles.
-fireBuyT1  = allowBuy  and vwapOKBuy  and buyT1
-fireBuyT2  = allowBuy  and vwapOKBuy  and buyT2  and minTier <= 2
-fireBuyT3  = allowBuy  and vwapOKBuy  and buyT3  and minTier <= 3
-fireSellT1 = allowSell and vwapOKSell and sellT1
-fireSellT2 = allowSell and vwapOKSell and sellT2 and minTier <= 2
-fireSellT3 = allowSell and vwapOKSell and sellT3 and minTier <= 3
+// Cooldown: prevent signal spam when conditions hold across many bars.
+var int lastBuyBar  = -10000
+var int lastSellBar = -10000
+buyCooldownOK  = bar_index - lastBuyBar  >= cooldownBars
+sellCooldownOK = bar_index - lastSellBar >= cooldownBars
+
+// Edge-detect: only fire when tier first becomes true (not every bar conditions hold).
+buyT1Edge  = buyT1  and not buyT1[1]
+buyT2Edge  = buyT2  and not buyT2[1]
+buyT3Edge  = buyT3  and not buyT3[1]
+sellT1Edge = sellT1 and not sellT1[1]
+sellT2Edge = sellT2 and not sellT2[1]
+sellT3Edge = sellT3 and not sellT3[1]
+
+// Apply min tier, direction toggles, edge detection AND cooldown.
+fireBuyT1  = allowBuy  and vwapOKBuy  and buyT1Edge  and buyCooldownOK
+fireBuyT2  = allowBuy  and vwapOKBuy  and buyT2Edge  and buyCooldownOK and minTier <= 2 and not fireBuyT1
+fireBuyT3  = allowBuy  and vwapOKBuy  and buyT3Edge  and buyCooldownOK and minTier <= 3 and not fireBuyT1 and not fireBuyT2
+fireSellT1 = allowSell and vwapOKSell and sellT1Edge and sellCooldownOK
+fireSellT2 = allowSell and vwapOKSell and sellT2Edge and sellCooldownOK and minTier <= 2 and not fireSellT1
+fireSellT3 = allowSell and vwapOKSell and sellT3Edge and sellCooldownOK and minTier <= 3 and not fireSellT1 and not fireSellT2
 
 anyBuy  = fireBuyT1  or fireBuyT2  or fireBuyT3
 anySell = fireSellT1 or fireSellT2 or fireSellT3
+
+// Update cooldown trackers.
+if anyBuy
+    lastBuyBar  := bar_index
+if anySell
+    lastSellBar := bar_index
 
 // ============================== VISUALS ======================================
 barC = na(delta) ? color.gray : delta > 0 ? color.new(color.teal, math.max(0, 80 - int(math.abs(deltaPct) * 80))) : color.new(color.red, math.max(0, 80 - int(math.abs(deltaPct) * 80)))
@@ -174,26 +204,73 @@ bgcolor(fireSellT2 ? color.new(color.fuchsia, 80) : na, title = "SELL flash")
 
 bgcolor(inRTH ? na : color.new(color.gray, 92), title = "Outside RTH")
 
-// Horizontal entry line at the signal bar's close, extends 30 bars right
-var line buyEntryLine = na
-var label buyEntryLabel = na
-if fireBuyT1 or fireBuyT2
-    if not na(buyEntryLine)
-        line.delete(buyEntryLine)
-    if not na(buyEntryLabel)
-        label.delete(buyEntryLabel)
-    buyEntryLine := line.new(bar_index, close, bar_index + 30, close, color = color.new(color.green, 0), width = 3, style = line.style_solid)
-    buyEntryLabel := label.new(bar_index + 30, close, "BUY @ " + str.tostring(close, format.mintick), style = label.style_label_left, color = color.new(color.green, 0), textcolor = color.white, size = size.normal)
+// ============================== ENTRY / SL / TP DRAWING ======================
+// When a Tier 1 or Tier 2 BUY/SELL fires, calculate entry, stop, three targets,
+// and position size, then draw the full bracket on the chart with $ values.
+dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
 
-var line sellEntryLine = na
-var label sellEntryLabel = na
-if fireSellT1 or fireSellT2
-    if not na(sellEntryLine)
-        line.delete(sellEntryLine)
-    if not na(sellEntryLabel)
-        label.delete(sellEntryLabel)
-    sellEntryLine := line.new(bar_index, close, bar_index + 30, close, color = color.new(color.red, 0), width = 3, style = line.style_solid)
-    sellEntryLabel := label.new(bar_index + 30, close, "SELL @ " + str.tostring(close, format.mintick), style = label.style_label_left, color = color.new(color.red, 0), textcolor = color.white, size = size.normal)
+var line  lnE  = na
+var line  lnS  = na
+var line  lnT1 = na
+var line  lnT2 = na
+var line  lnT3 = na
+var label lbE  = na
+var label lbS  = na
+var label lbT1 = na
+var label lbT2 = na
+var label lbT3 = na
+
+f_clear_bracket() =>
+    if not na(lnE)
+        line.delete(lnE)
+    if not na(lnS)
+        line.delete(lnS)
+    if not na(lnT1)
+        line.delete(lnT1)
+    if not na(lnT2)
+        line.delete(lnT2)
+    if not na(lnT3)
+        line.delete(lnT3)
+    if not na(lbE)
+        label.delete(lbE)
+    if not na(lbS)
+        label.delete(lbS)
+    if not na(lbT1)
+        label.delete(lbT1)
+    if not na(lbT2)
+        label.delete(lbT2)
+    if not na(lbT3)
+        label.delete(lbT3)
+
+trigBuy  = fireBuyT1  or fireBuyT2
+trigSell = fireSellT1 or fireSellT2
+
+if showSLTP and (trigBuy or trigSell)
+    f_clear_bracket()
+    e   = close
+    rd  = atr14 * slATR
+    sl  = trigBuy ? e - rd : e + rd
+    t1  = trigBuy ? e + rd * tp1R : e - rd * tp1R
+    t2  = trigBuy ? e + rd * tp2R : e - rd * tp2R
+    t3  = trigBuy ? e + rd * tp3R : e - rd * tp3R
+    rPC = rd * dpp
+    qty = rPC > 0 ? math.max(1, math.min(maxCon, math.floor(riskTrade / rPC))) : 1
+    rx  = bar_index + 30
+    cE  = trigBuy ? color.new(color.green, 0) : color.new(color.red, 0)
+    cS  = color.new(color.red, 0)
+    cT  = color.new(color.lime, 0)
+    dirTxt = trigBuy ? "BUY" : "SELL"
+    riskAmt = rPC * qty
+    lnE  := line.new(bar_index, e,  rx, e,  color = cE, width = 3, style = line.style_solid)
+    lnS  := line.new(bar_index, sl, rx, sl, color = cS, width = 2, style = line.style_dashed)
+    lnT1 := line.new(bar_index, t1, rx, t1, color = cT, width = 1, style = line.style_dotted)
+    lnT2 := line.new(bar_index, t2, rx, t2, color = cT, width = 1, style = line.style_dotted)
+    lnT3 := line.new(bar_index, t3, rx, t3, color = cT, width = 2, style = line.style_dotted)
+    lbE  := label.new(rx, e,  dirTxt + " " + str.tostring(e, format.mintick) + "  " + str.tostring(qty) + " ct", style = label.style_label_left, color = cE,                   textcolor = color.white, size = size.normal)
+    lbS  := label.new(rx, sl, "SL "  + str.tostring(sl, format.mintick) + "  -$" + str.tostring(riskAmt, "#.##"), style = label.style_label_left, color = color.new(#ffb3b3, 0), textcolor = color.black, size = size.small)
+    lbT1 := label.new(rx, t1, "TP1 " + str.tostring(t1, format.mintick) + "  +$" + str.tostring(riskAmt * tp1R, "#.##"), style = label.style_label_left, color = color.new(#c8f7c5, 0), textcolor = color.black, size = size.small)
+    lbT2 := label.new(rx, t2, "TP2 " + str.tostring(t2, format.mintick) + "  +$" + str.tostring(riskAmt * tp2R, "#.##"), style = label.style_label_left, color = color.new(#a8f5a3, 0), textcolor = color.black, size = size.small)
+    lbT3 := label.new(rx, t3, "TP3 " + str.tostring(t3, format.mintick) + "  +$" + str.tostring(riskAmt * tp3R, "#.##"), style = label.style_label_left, color = color.new(#7df077, 0), textcolor = color.black, size = size.small)
 
 // ============================== ALERTS =======================================
 if fireBuyT1
