@@ -15,7 +15,8 @@
 // Filters: above session VWAP for buys, below for sells (toggleable).
 // =============================================================================
 
-indicator("Orderflow Buy/Sell", "OF-Signal", overlay = true)
+indicator("Orderflow Buy/Sell", "OF-Signal", overlay = true,
+     max_lines_count = 50, max_labels_count = 50)
 
 // ============================== INPUTS =======================================
 ltfMode    = input.string("Auto", "Lower-TF", options = ["Auto","1S","5S","15S","1","5"], group = "Engine", tooltip = "Auto picks based on chart TF. Tries to read intra-bar volume for buy/sell classification.")
@@ -149,19 +150,50 @@ plot(showCVD and inRTH ? cvdScaled : na, "Sess CVD", color = color.new(color.ora
 
 plot(showVWAP and inRTH ? vwap : na, "VWAP", color = color.new(color.yellow, 0), linewidth = 2)
 
-// Tier 1: big bold label
-plotshape(fireBuyT1,  "BUY A+",  shape.labelup,   location.belowbar, color.new(color.green,   0), text = "BUY A+",  textcolor = color.white, size = size.normal)
-plotshape(fireSellT1, "SELL A+", shape.labeldown, location.abovebar, color.new(color.red,     0), text = "SELL A+", textcolor = color.white, size = size.normal)
+// Tier 1 (A+): HUGE label + arrow + bright background flash
+plotshape(fireBuyT1,  "BUY A+",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY A+",  textcolor = color.white, size = size.huge)
+plotshape(fireBuyT1,  "BUY arrow", shape.arrowup, location.belowbar, color.new(color.lime,  0), size = size.large)
+plotshape(fireSellT1, "SELL A+", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL A+", textcolor = color.white, size = size.huge)
+plotshape(fireSellT1, "SELL arrow", shape.arrowdown, location.abovebar, color.new(color.maroon, 0), size = size.large)
 
-// Tier 2: standard label
-plotshape(fireBuyT2,  "BUY",  shape.labelup,   location.belowbar, color.new(color.lime,    0), text = "BUY",  textcolor = color.black, size = size.small)
-plotshape(fireSellT2, "SELL", shape.labeldown, location.abovebar, color.new(color.fuchsia, 0), text = "SELL", textcolor = color.white, size = size.small)
+// Tier 2 (A): large label + arrow
+plotshape(fireBuyT2,  "BUY",  shape.labelup,   location.belowbar, color.new(color.lime, 0),    text = "BUY",  textcolor = color.black, size = size.large)
+plotshape(fireBuyT2,  "BUY ar2", shape.arrowup, location.belowbar, color.new(color.green, 30), size = size.normal)
+plotshape(fireSellT2, "SELL", shape.labeldown, location.abovebar, color.new(color.fuchsia, 0), text = "SELL", textcolor = color.white, size = size.large)
+plotshape(fireSellT2, "SELL ar2", shape.arrowdown, location.abovebar, color.new(color.red, 30), size = size.normal)
 
-// Tier 3: small triangle
-plotshape(fireBuyT3,  "buy",  shape.triangleup,   location.belowbar, color.new(color.aqua,    0), size = size.tiny)
-plotshape(fireSellT3, "sell", shape.triangledown, location.abovebar, color.new(color.maroon,  0), size = size.tiny)
+// Tier 3 (B): standard triangle
+plotshape(fireBuyT3,  "buy",  shape.triangleup,   location.belowbar, color.new(color.aqua,    0), size = size.small)
+plotshape(fireSellT3, "sell", shape.triangledown, location.abovebar, color.new(color.maroon,  0), size = size.small)
+
+// Background flash on signal bars - dramatic visual cue
+bgcolor(fireBuyT1  ? color.new(color.green, 70)   : na, title = "BUY A+ flash")
+bgcolor(fireBuyT2  ? color.new(color.lime,  80)   : na, title = "BUY flash")
+bgcolor(fireSellT1 ? color.new(color.red,   70)   : na, title = "SELL A+ flash")
+bgcolor(fireSellT2 ? color.new(color.fuchsia, 80) : na, title = "SELL flash")
 
 bgcolor(inRTH ? na : color.new(color.gray, 92), title = "Outside RTH")
+
+// Horizontal entry line at the signal bar's close, extends 30 bars right
+var line buyEntryLine = na
+var label buyEntryLabel = na
+if fireBuyT1 or fireBuyT2
+    if not na(buyEntryLine)
+        line.delete(buyEntryLine)
+    if not na(buyEntryLabel)
+        label.delete(buyEntryLabel)
+    buyEntryLine := line.new(bar_index, close, bar_index + 30, close, color = color.new(color.green, 0), width = 3, style = line.style_solid)
+    buyEntryLabel := label.new(bar_index + 30, close, "BUY @ " + str.tostring(close, format.mintick), style = label.style_label_left, color = color.new(color.green, 0), textcolor = color.white, size = size.normal)
+
+var line sellEntryLine = na
+var label sellEntryLabel = na
+if fireSellT1 or fireSellT2
+    if not na(sellEntryLine)
+        line.delete(sellEntryLine)
+    if not na(sellEntryLabel)
+        label.delete(sellEntryLabel)
+    sellEntryLine := line.new(bar_index, close, bar_index + 30, close, color = color.new(color.red, 0), width = 3, style = line.style_solid)
+    sellEntryLabel := label.new(bar_index + 30, close, "SELL @ " + str.tostring(close, format.mintick), style = label.style_label_left, color = color.new(color.red, 0), textcolor = color.white, size = size.normal)
 
 // ============================== ALERTS =======================================
 if fireBuyT1
