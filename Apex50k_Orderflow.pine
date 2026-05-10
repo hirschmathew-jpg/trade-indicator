@@ -19,14 +19,16 @@ indicator("Orderflow Buy/Sell", "OF-Signal", overlay = true)
 
 // ============================== INPUTS =======================================
 ltfMode    = input.string("Auto", "Lower-TF", options = ["Auto","1S","5S","15S","1","5"], group = "Engine", tooltip = "Auto picks based on chart TF. Tries to read intra-bar volume for buy/sell classification.")
-imbThresh  = input.float(2.0, "Imbalance Ratio",         minval = 1.5, step = 0.1, group = "Engine", tooltip = "Buy/Sell volume ratio that counts as a one-sided bar. 2.0 = buyers 2x sellers.")
-strongDel  = input.float(0.30, "Strong Delta % Threshold", minval = 0.10, step = 0.05, group = "Engine", tooltip = "Bar's net delta as fraction of total volume to count as strong directional pressure.")
+imbThresh  = input.float(1.7, "Imbalance Ratio",         minval = 1.3, step = 0.1, group = "Engine", tooltip = "Buy/Sell volume ratio that counts as a one-sided bar. Lower = more signals.")
+strongDel  = input.float(0.20, "Strong Delta % Threshold", minval = 0.10, step = 0.05, group = "Engine", tooltip = "Bar's net delta as fraction of total volume.")
 absVolMul  = input.float(1.7, "Absorption Vol Multiplier", minval = 1.1, step = 0.1, group = "Engine")
+cvdLook    = input.int(3,    "CVD Trend Lookback Bars",  minval = 1, maxval = 20, group = "Engine", tooltip = "CVD must be higher (or lower for sells) than this many bars ago. Smoothing prevents single-bar noise.")
 
 useVwap    = input.bool(true, "Buys above VWAP only / Sells below", group = "Filter")
+vwapBuffer = input.float(0.0, "VWAP Buffer (ATR fraction)", minval = 0.0, step = 0.1, group = "Filter", tooltip = "Allows buys when within this ATR distance below VWAP. 0 = strict.")
 allowBuy   = input.bool(true, "Show BUY signals", group = "Filter")
 allowSell  = input.bool(true, "Show SELL signals", group = "Filter")
-minTier    = input.int(2, "Minimum signal tier (1=A+, 2=A, 3=B)", minval = 1, maxval = 3, group = "Filter", tooltip = "1 = only highest conviction. 2 = also show A. 3 = show all including B markers.")
+minTier    = input.int(3, "Minimum signal tier (1=A+, 2=A, 3=B)", minval = 1, maxval = 3, group = "Filter", tooltip = "1 = only A+. 2 = A+ and A. 3 = all including B markers (default).")
 
 showBars   = input.bool(true, "Color bars by delta strength", group = "Visuals")
 showCVD    = input.bool(true, "Plot session CVD overlay",     group = "Visuals")
@@ -74,12 +76,15 @@ isNewSess = ta.change(sessFlag) > 0
 
 var float cvd = 0.0
 cvd := isNewSess ? delta : nz(cvd[1]) + delta
-cvdRising  = not isNewSess and cvd > nz(cvd[1])
-cvdFalling = not isNewSess and cvd < nz(cvd[1])
+// 3-bar (or user-set) CVD trend - more permissive than strict last-bar comparison.
+cvdRising  = not isNewSess and cvd > nz(cvd[cvdLook])
+cvdFalling = not isNewSess and cvd < nz(cvd[cvdLook])
 
 vwap      = ta.vwap(hlc3, isNewSess)
-aboveVwap = inRTH and close > vwap
-belowVwap = inRTH and close < vwap
+atr14     = ta.atr(14)
+// VWAP filter with optional ATR buffer.
+aboveVwap = inRTH and close > vwap - atr14 * vwapBuffer
+belowVwap = inRTH and close < vwap + atr14 * vwapBuffer
 
 // ============================== ORDERFLOW SIGNALS ============================
 // Stacked imbalance: 2+ consecutive one-sided bars.
