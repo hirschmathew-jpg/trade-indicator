@@ -105,8 +105,8 @@ else if inSession
     sHigh := math.max(nz(sHigh, high), high)
     sLow  := math.min(nz(sLow,  low),  low)
 
-barMin = math.max(1, timeframe.in_seconds(timeframe.period) / 60)
-orBars = math.max(1, math.ceil(orMin / barMin))
+barMin = math.max(1.0, timeframe.in_seconds(timeframe.period) / 60.0)
+orBars = math.max(1, int(math.ceil(orMin / barMin)))
 inOR   = inSession and sessBar < orBars
 var float orH = na
 var float orL = na
@@ -175,8 +175,9 @@ deltaPct = totalVol > 0 ? delta / totalVol : 0.0
 
 var float cvd = 0.0
 cvd := isNewSess ? delta : nz(cvd[1]) + delta
-cvdUp = cvd > nz(cvd[1])
-cvdDn = cvd < nz(cvd[1])
+// Suppress direction flags on first session bar (no valid prior to compare).
+cvdUp = not isNewSess and cvd > nz(cvd[1])
+cvdDn = not isNewSess and cvd < nz(cvd[1])
 
 // ============================== IMB / ABSORB =================================
 isBuyImb  = buyVol  > sellVol * imbThresh
@@ -256,25 +257,29 @@ var int   tBar   = na
 var float tRdist = na
 var int   tSize  = 0
 if fireLong
-    tEntry := close
-    tStop  := f_long_sl(tEntry)
-    tRdist := tEntry - tStop
-    tTP1   := tEntry + tRdist * tp1R
-    tTP2   := tEntry + tRdist * tp2R
-    tTP3   := tEntry + tRdist * tp3R
-    tDir   := 1
-    tBar   := bar_index
-    lastSig := bar_index
+    sl = f_long_sl(close)
+    if not na(sl) and close - sl > 0
+        tEntry := close
+        tStop  := sl
+        tRdist := tEntry - tStop
+        tTP1   := tEntry + tRdist * tp1R
+        tTP2   := tEntry + tRdist * tp2R
+        tTP3   := tEntry + tRdist * tp3R
+        tDir   := 1
+        tBar   := bar_index
+        lastSig := bar_index
 if fireShort
-    tEntry := close
-    tStop  := f_short_sl(tEntry)
-    tRdist := tStop - tEntry
-    tTP1   := tEntry - tRdist * tp1R
-    tTP2   := tEntry - tRdist * tp2R
-    tTP3   := tEntry - tRdist * tp3R
-    tDir   := -1
-    tBar   := bar_index
-    lastSig := bar_index
+    sl = f_short_sl(close)
+    if not na(sl) and sl - close > 0
+        tEntry := close
+        tStop  := sl
+        tRdist := tStop - tEntry
+        tTP1   := tEntry - tRdist * tp1R
+        tTP2   := tEntry - tRdist * tp2R
+        tTP3   := tEntry - tRdist * tp3R
+        tDir   := -1
+        tBar   := bar_index
+        lastSig := bar_index
 
 rPerContract = na(tRdist) ? na : tRdist * dollarPerPoint
 suggestSize  = na(rPerContract) or rPerContract <= 0 ? 0 : math.floor(riskPerTrade / rPerContract)

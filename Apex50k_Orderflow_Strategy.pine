@@ -103,8 +103,8 @@ else if inSession
     sLow  := math.min(nz(sLow,  low),  low)
 
 // Opening range (first orMin minutes after session open)
-barMin    = math.max(1, timeframe.in_seconds(timeframe.period) / 60)
-orBars    = math.max(1, math.ceil(orMin / barMin))
+barMin    = math.max(1.0, timeframe.in_seconds(timeframe.period) / 60.0)
+orBars    = math.max(1, int(math.ceil(orMin / barMin)))
 inOR      = inSession and sessBar < orBars
 var float orH = na
 var float orL = na
@@ -174,11 +174,12 @@ delta    = buyVol - sellVol
 totalVol = buyVol + sellVol
 deltaPct = totalVol > 0 ? delta / totalVol : 0.0
 
-// Session-anchored CVD - resets on every new RTH open.
+// Session-anchored CVD - resets on every new RTH open. Direction flags are
+// suppressed on the first bar of session (no valid prior to compare against).
 var float cvd = 0.0
 cvd := isNewSess ? delta : nz(cvd[1]) + delta
-cvdUp = cvd > nz(cvd[1])
-cvdDn = cvd < nz(cvd[1])
+cvdUp = not isNewSess and cvd > nz(cvd[1])
+cvdDn = not isNewSess and cvd < nz(cvd[1])
 
 // ============================== IMB / ABSORB =================================
 isBuyImb  = buyVol  > sellVol * imbThresh
@@ -228,6 +229,10 @@ shortOK = (not useVwapF  or belowVwap) and (not useORBias or orBiasDn)
 rawLong  = inSession and orReady and longOK  and longScore  >= minScore
 rawShort = inSession and orReady and shortOK and shortScore >= minScore
 
+// Cooldown - prevents back-to-back signals after a trade closes.
+var int lastSig = -1000
+canFire = bar_index - lastSig >= cooldownBars
+
 // ============================== SIZE / SL / TP ===============================
 // Session-only swings (only look at bars in current session).
 swingLow  = ta.lowest(low,  math.min(swingLen, math.max(2, sessBar + 1)))
@@ -248,47 +253,102 @@ f_short_sl(entry) =>
         "Swing" => sls
         => math.max(sla, sls)
 
+// ============================== ACTIVE TRADE STATE ===========================
+// Tracks the currently open trade so we can re-issue exits each bar with the
+// correct dynamic stop (break-even kicks in only AFTER TP1 actually fills).
+var float aEntry = na
+var float aStop  = na
+var float aTP1   = na
+var float aTP2   = na
+var float aTP3   = na
+var int   aQty   = 0
+var int   aQ1    = 0
+var int   aQ2    = 0
+var int   aDir   = 0
+var bool  aTp1   = false
+
+// Reset state when flat.
+if strategy.position_size == 0
+    aDir := 0
+    aTp1 := false
+
 // Force flat at end of session.
 if flatNow and strategy.position_size != 0
     strategy.close_all(comment = "EOD flat")
 
-// Long entry
-if rawLong and strategy.position_size == 0 and not flatNow
+// ============================== ENTRIES ======================================
+// Exits are placed alongside the entry so they activate on the next bar - if
+// we waited until strategy.position_size > 0 was visible, exits would only
+// be placed on bar X+1 leaving the position naked on bar X.
+if rawLong and canFire and strategy.position_size == 0 and not flatNow
     entry = close
     stopP = f_long_sl(entry)
     rDist = entry - stopP
-    if rDist > 0
+    if rDist > 0 and not na(stopP)
         qty = math.floor(riskPerTrade / (rDist * dpp))
         qty := math.max(1, math.min(qty, maxContracts))
-        tp1 = entry + rDist * tp1R
-        tp2 = entry + rDist * tp2R
-        tp3 = entry + rDist * tp3R
-        // Split into thirds; last leg takes the remainder (handles odd qty).
-        q1 = math.max(1, math.floor(qty / 3))
-        q2 = math.max(1, math.floor(qty / 3))
-        // ONE entry for full qty, THREE exits scale out (1/3, 1/3, runner).
+        q1  = math.max(1, math.floor(qty / 3))
+        q2  = math.max(1, math.floor(qty / 3))
+        aEntry := entry
+        aStop  := stopP
+        aTP1   := entry + rDist * tp1R
+        aTP2   := entry + rDist * tp2R
+        aTP3   := entry + rDist * tp3R
+        aQty   := qty
+        aQ1    := q1
+        aQ2    := q2
+        aDir   := 1
+        aTp1   := false
+        lastSig := bar_index
         strategy.entry("L", strategy.long, qty = qty)
-        strategy.exit("X-TP1", from_entry = "L", qty = q1, limit = tp1, stop = stopP)
-        strategy.exit("X-TP2", from_entry = "L", qty = q2, limit = tp2, stop = beAfterTP1 ? entry : stopP)
-        strategy.exit("X-TP3", from_entry = "L",            limit = tp3, stop = beAfterTP1 ? entry : stopP)
+        strategy.exit("L-TP1", from_entry = "L", qty = q1, limit = aTP1, stop = aStop)
+        strategy.exit("L-TP2", from_entry = "L", qty = q2, limit = aTP2, stop = aStop)
+        strategy.exit("L-TP3", from_entry = "L",            limit = aTP3, stop = aStop)
 
-// Short entry
-if rawShort and strategy.position_size == 0 and not flatNow
+if rawShort and canFire and strategy.position_size == 0 and not flatNow
     entry = close
     stopP = f_short_sl(entry)
     rDist = stopP - entry
-    if rDist > 0
+    if rDist > 0 and not na(stopP)
         qty = math.floor(riskPerTrade / (rDist * dpp))
         qty := math.max(1, math.min(qty, maxContracts))
-        tp1 = entry - rDist * tp1R
-        tp2 = entry - rDist * tp2R
-        tp3 = entry - rDist * tp3R
-        q1 = math.max(1, math.floor(qty / 3))
-        q2 = math.max(1, math.floor(qty / 3))
+        q1  = math.max(1, math.floor(qty / 3))
+        q2  = math.max(1, math.floor(qty / 3))
+        aEntry := entry
+        aStop  := stopP
+        aTP1   := entry - rDist * tp1R
+        aTP2   := entry - rDist * tp2R
+        aTP3   := entry - rDist * tp3R
+        aQty   := qty
+        aQ1    := q1
+        aQ2    := q2
+        aDir   := -1
+        aTp1   := false
+        lastSig := bar_index
         strategy.entry("S", strategy.short, qty = qty)
-        strategy.exit("X-TP1", from_entry = "S", qty = q1, limit = tp1, stop = stopP)
-        strategy.exit("X-TP2", from_entry = "S", qty = q2, limit = tp2, stop = beAfterTP1 ? entry : stopP)
-        strategy.exit("X-TP3", from_entry = "S",            limit = tp3, stop = beAfterTP1 ? entry : stopP)
+        strategy.exit("S-TP1", from_entry = "S", qty = q1, limit = aTP1, stop = aStop)
+        strategy.exit("S-TP2", from_entry = "S", qty = q2, limit = aTP2, stop = aStop)
+        strategy.exit("S-TP3", from_entry = "S",            limit = aTP3, stop = aStop)
+
+// ============================== DYNAMIC STOP (BE after TP1) ==================
+// On every subsequent bar we re-issue the exits so we can lift the stop on
+// TP2/TP3 to break-even AFTER TP1 has actually filled. Re-issuing with the
+// same ID modifies the existing OCO order rather than creating duplicates.
+if aDir == 1 and not aTp1 and not na(aTP1) and high >= aTP1
+    aTp1 := true
+if aDir == -1 and not aTp1 and not na(aTP1) and low  <= aTP1
+    aTp1 := true
+
+dynStop = beAfterTP1 and aTp1 ? aEntry : aStop
+
+if aDir == 1 and strategy.position_size > 0 and bar_index > lastSig
+    strategy.exit("L-TP1", from_entry = "L", qty = aQ1, limit = aTP1, stop = aStop)
+    strategy.exit("L-TP2", from_entry = "L", qty = aQ2, limit = aTP2, stop = dynStop)
+    strategy.exit("L-TP3", from_entry = "L",            limit = aTP3, stop = dynStop)
+if aDir == -1 and strategy.position_size < 0 and bar_index > lastSig
+    strategy.exit("S-TP1", from_entry = "S", qty = aQ1, limit = aTP1, stop = aStop)
+    strategy.exit("S-TP2", from_entry = "S", qty = aQ2, limit = aTP2, stop = dynStop)
+    strategy.exit("S-TP3", from_entry = "S",            limit = aTP3, stop = dynStop)
 
 // ============================== VISUALS ======================================
 plot(inSession ? vwap : na, "Session VWAP", color = color.new(color.yellow, 0), linewidth = 2)
