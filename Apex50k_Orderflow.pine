@@ -13,9 +13,10 @@ indicator("Apex 50k Orderflow", "APX-OF", overlay = true,
 // ============================== INPUTS =======================================
 gSig      = "Signal"
 useORBrk  = input.bool(true,  "OR Breakout Trigger",  group = gSig)
-useOFTrig = input.bool(false, "Orderflow Triggers (imb/absorb/delta)", group = gSig, tooltip = "Default OFF - reduces signal quality on bar-level fallback data.")
+useOFTrig = input.bool(false, "Orderflow Triggers (imb/absorb/delta)", group = gSig)
 useVwap   = input.bool(true,  "Require VWAP Side (veto)",  group = gSig)
 useOFConf = input.bool(false, "Require Orderflow Confirm on OR Break", group = gSig)
+brkMinRng = input.float(0.5,  "Min Breakout Bar Range / ATR",  minval = 0.0, step = 0.1, group = gSig, tooltip = "0 = disabled. Filters wick fakeouts.")
 allowLong = input.bool(true,  "Allow Long Entries",  group = gSig)
 allowShort= input.bool(true,  "Allow Short Entries", group = gSig)
 
@@ -32,13 +33,13 @@ flatBy    = input.session("1555-1600", "Force-Flat (NY)", group = gSess)
 orMin     = input.int(15, "Opening Range Minutes", minval = 1, maxval = 60, group = gSess)
 
 gRisk     = "Risk / SL / TP"
-slMode    = input.string("ATR + Swing", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = gRisk)
-slATR     = input.float(1.5, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
+slMode    = input.string("ATR", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = gRisk, tooltip = "ATR-only gives consistent tight stops -> sizes up to ~20 contracts.")
+slATR     = input.float(1.0, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
 swingLen  = input.int(8,     "Swing Lookback", minval = 3, maxval = 30, group = gRisk)
 atrLen    = input.int(14,    "ATR Length", group = gRisk)
 tp1R      = input.float(1.0, "TP1 R", group = gRisk)
 tp2R      = input.float(2.0, "TP2 R", group = gRisk)
-tp3R      = input.float(3.0, "TP3 R", group = gRisk)
+tp3R      = input.float(4.0, "TP3 R", group = gRisk)
 cooldown  = input.int(5,     "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k"
@@ -143,8 +144,9 @@ ofShort = stackedSell or absorbSell or deltaPct < -strongDel
 // ============================== TRIGGERS =====================================
 brokeHi    = orReady and not na(orH) and close > orH
 brokeLo    = orReady and not na(orL) and close < orL
-firstBrkUp = brokeHi and not brokeHi[1]
-firstBrkDn = brokeLo and not brokeLo[1]
+strongBar  = brkMinRng <= 0 or (high - low) > atr * brkMinRng
+firstBrkUp = brokeHi and not brokeHi[1] and strongBar
+firstBrkDn = brokeLo and not brokeLo[1] and strongBar
 
 orTrigLong   = useORBrk and firstBrkUp and (not useOFConf or ofLong)
 orTrigShort  = useORBrk and firstBrkDn and (not useOFConf or ofShort)
