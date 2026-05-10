@@ -317,12 +317,25 @@ if fireShort
     tBar   := bar_index
     lastSig := bar_index
 
-// Position size: floor(riskPerTrade / (R-distance in $)).
+// Position size: floor(riskPerTrade / (R-distance in $)), but never less than 1
+// when a signal actually fires - if the stop is too wide, you still trade 1
+// contract (and the label shows the real $ risk so you can decide).
 rPerContract = na(tRdist) ? na : tRdist * dollarPerPoint
 suggestSize  = na(rPerContract) or rPerContract <= 0 ? 0 : math.floor(riskPerTrade / rPerContract)
-suggestSize  := math.max(0, math.min(suggestSize, maxContracts))
+suggestSize  := math.min(maxContracts, math.max(1, suggestSize))
 if (fireLong or fireShort)
     tSize := suggestSize
+
+// LIVE PREVIEW: what size would I trade RIGHT NOW if a signal fired this bar?
+// Uses current ATR/swing to compute a hypothetical SL distance. Shown in the
+// table so you can plan size before the signal prints.
+liveLongSL  = math.min(close - atrStop, swingLow  - syminfo.mintick * 2)
+liveShortSL = math.max(close + atrStop, swingHigh + syminfo.mintick * 2)
+liveBias    = trendUp and aboveVwap ? 1 : trendDown and belowVwap ? -1 : 0
+liveRdist   = liveBias == 1 ? close - liveLongSL : liveBias == -1 ? liveShortSL - close : math.max(close - liveLongSL, liveShortSL - close)
+liveRPC     = liveRdist > 0 ? liveRdist * dollarPerPoint : na
+livePrev    = na(liveRPC) ? 0 : math.min(maxContracts, math.max(1, math.floor(riskPerTrade / liveRPC)))
+liveRiskUsd = na(liveRPC) ? na : liveRPC * livePrev
 
 // Trade close detection (intrabar approximation on close basis).
 tradeOpen = tDir != 0 and not na(tEntry)
@@ -466,12 +479,23 @@ if showTable and barstate.islast
     table.cell(t, 0, 9, "TP1/2/3", bgcolor = bgLabel, text_color = color.black, text_size = size.small)
     table.cell(t, 1, 9, na(tTP1)   ? "-" : str.tostring(tTP1, format.mintick) + " / " + str.tostring(tTP2, format.mintick) + " / " + str.tostring(tTP3, format.mintick), bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
-    table.cell(t, 0, 10, "Size",   bgcolor = bgLabel, text_color = color.black, text_size = size.small)
-    sizeStr = na(rPerContract) or rPerContract <= 0 ? "-" : str.tostring(tSize) + " ct  ($" + str.tostring(rPerContract * tSize, "#.##") + " risk)"
-    table.cell(t, 1, 10, sizeStr,  bgcolor = bgValue, text_color = color.black, text_size = size.small)
+    // Show ACTIVE trade size if one is open, otherwise show LIVE PREVIEW size
+    // (what you would trade if a signal fired right now).
+    activeTrade = tDir != 0 and not na(rPerContract) and rPerContract > 0
+    showSize    = activeTrade ? tSize : livePrev
+    showRpc     = activeTrade ? rPerContract : liveRPC
+    sizeLabel   = activeTrade ? "Size (active)" : "Size (preview)"
+    table.cell(t, 0, 10, sizeLabel, bgcolor = bgLabel, text_color = color.black, text_size = size.small)
+    if na(showRpc) or showRpc <= 0 or showSize <= 0
+        table.cell(t, 1, 10, "-", bgcolor = bgValue, text_color = color.black, text_size = size.small)
+    else
+        usedRisk = showRpc * showSize
+        overBudget = usedRisk > riskPerTrade * 1.05
+        sizeStr  = str.tostring(showSize) + " ct  ($" + str.tostring(usedRisk, "#.##") + (overBudget ? " OVER" : " risk") + ")"
+        table.cell(t, 1, 10, sizeStr, bgcolor = bgValue, text_color = overBudget ? color.new(color.red, 0) : color.black, text_size = size.small)
 
     table.cell(t, 0, 11, "Reward 1R/2R/3R", bgcolor = bgLabel, text_color = color.black, text_size = size.small)
-    rewStr = na(rPerContract) or rPerContract <= 0 ? "-" : "$" + str.tostring(rPerContract * tp1R * tSize, "#.##") + " / $" + str.tostring(rPerContract * tp2R * tSize, "#.##") + " / $" + str.tostring(rPerContract * tp3R * tSize, "#.##")
+    rewStr = na(showRpc) or showRpc <= 0 or showSize <= 0 ? "-" : "$" + str.tostring(showRpc * tp1R * showSize, "#.##") + " / $" + str.tostring(showRpc * tp2R * showSize, "#.##") + " / $" + str.tostring(showRpc * tp3R * showSize, "#.##")
     table.cell(t, 1, 11, rewStr,   bgcolor = bgValue, text_color = color.black, text_size = size.small)
 
     table.cell(t, 0, 12, "Trail DD Cap",  bgcolor = bgLabel, text_color = color.black, text_size = size.small)
