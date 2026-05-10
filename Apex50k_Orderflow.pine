@@ -13,9 +13,11 @@ indicator("Apex 50k Orderflow", "APX-OF", overlay = true,
 // ============================== INPUTS =======================================
 gSig      = "Signal"
 useORBrk  = input.bool(true,  "OR Breakout Trigger",  group = gSig)
-useOFTrig = input.bool(true,  "Orderflow Triggers (imb/absorb/delta)", group = gSig)
+useOFTrig = input.bool(false, "Orderflow Triggers (imb/absorb/delta)", group = gSig, tooltip = "Default OFF - reduces signal quality on bar-level fallback data.")
 useVwap   = input.bool(true,  "Require VWAP Side (veto)",  group = gSig)
 useOFConf = input.bool(false, "Require Orderflow Confirm on OR Break", group = gSig)
+allowLong = input.bool(true,  "Allow Long Entries",  group = gSig)
+allowShort= input.bool(true,  "Allow Short Entries", group = gSig)
 
 gOF       = "Orderflow"
 ltfMode   = input.string("Auto", "Lower-TF", options = ["Auto","1S","5S","15S","1","5"], group = gOF)
@@ -155,8 +157,8 @@ triggerShort = orTrigShort or ofTrigShort
 vetoLong  = not useVwap or aboveVwap
 vetoShort = not useVwap or belowVwap
 
-rawLong  = inSess and not flatNow and triggerLong  and vetoLong
-rawShort = inSess and not flatNow and triggerShort and vetoShort
+rawLong  = allowLong  and inSess and not flatNow and triggerLong  and vetoLong
+rawShort = allowShort and inSess and not flatNow and triggerShort and vetoShort
 
 var int lastSig = -1000
 canFire = bar_index - lastSig >= cooldown

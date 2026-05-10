@@ -17,6 +17,8 @@ strategy("Apex 50k OF Strategy", "APX-OF",
      commission_type      = strategy.commission.cash_per_contract,
      commission_value     = 2.50,
      slippage             = 2,
+     margin_long          = 1.0,
+     margin_short         = 1.0,
      process_orders_on_close = true,
      calc_on_every_tick   = false,
      max_labels_count     = 500,
@@ -24,10 +26,12 @@ strategy("Apex 50k OF Strategy", "APX-OF",
 
 // ============================== INPUTS =======================================
 gSig      = "Signal"
-useORBrk  = input.bool(true,  "OR Breakout Trigger",  group = gSig, tooltip = "Long when price first closes above session opening-range high; short on first close below OR low.")
-useOFTrig = input.bool(true,  "Orderflow Triggers (imb/absorb/delta)", group = gSig)
+useORBrk  = input.bool(true,  "OR Breakout Trigger",  group = gSig, tooltip = "Long on first close above session OR high; short on first close below OR low. Backtest shows this is where the edge is.")
+useOFTrig = input.bool(false, "Orderflow Triggers (imb/absorb/delta)", group = gSig, tooltip = "Defaults OFF - in backtest these triggers added trades with ~50% WR and 0.92 R/R, dragging the profitable OR-breakout edge down. Turn on only if you have Premium+ for full LTF data history.")
 useVwap   = input.bool(true,  "Require VWAP Side (veto)",  group = gSig)
-useOFConf = input.bool(false, "Require Orderflow Confirm on OR Break", group = gSig, tooltip = "When ON, OR-breakout entries also need a true orderflow signal that bar.")
+useOFConf = input.bool(false, "Require Orderflow Confirm on OR Break", group = gSig)
+allowLong = input.bool(true,  "Allow Long Entries",  group = gSig)
+allowShort= input.bool(true,  "Allow Short Entries", group = gSig)
 
 gOF       = "Orderflow"
 ltfMode   = input.string("Auto", "Lower-TF", options = ["Auto","1S","5S","15S","1","5"], group = gOF)
@@ -49,7 +53,7 @@ atrLen    = input.int(14,    "ATR Length", group = gRisk)
 tp1R      = input.float(1.0, "TP1 R", group = gRisk)
 tp2R      = input.float(2.0, "TP2 R", group = gRisk)
 tp3R      = input.float(3.0, "TP3 R", group = gRisk)
-beAfter1  = input.bool(true, "Move SL to BE after TP1", group = gRisk)
+beAfter1  = input.bool(false, "Move SL to BE after TP1", group = gRisk, tooltip = "Defaults OFF - backtest showed BE-after-TP1 cuts winners short. Turn on if you trade live and want to lock in TP1 fills.")
 cooldown  = input.int(5,     "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k"
@@ -162,8 +166,8 @@ triggerShort = orTrigShort or ofTrigShort
 vetoLong  = not useVwap or aboveVwap
 vetoShort = not useVwap or belowVwap
 
-rawLong  = inSess and not flatNow and triggerLong  and vetoLong
-rawShort = inSess and not flatNow and triggerShort and vetoShort
+rawLong  = allowLong  and inSess and not flatNow and triggerLong  and vetoLong
+rawShort = allowShort and inSess and not flatNow and triggerShort and vetoShort
 
 var int lastSig = -1000
 canFire = bar_index - lastSig >= cooldown
