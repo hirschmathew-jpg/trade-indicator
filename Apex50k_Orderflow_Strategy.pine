@@ -1,39 +1,19 @@
 //@version=6
 // =============================================================================
-// Apex 50k Orderflow Pro - STRATEGY (Backtest version)
+// Apex 50k Orderflow Pro - STRATEGY (Session-Only)
 // -----------------------------------------------------------------------------
-// Same engine as the indicator, wired into Pine's strategy framework so you
-// can read win rate, profit factor, max DD, equity curve in Strategy Tester.
+// Pure intraday: every reference resets at the RTH open (0930 NY).
+//   * No multi-day EMAs
+//   * No multi-day divergence lookback
+//   * Bias = session-VWAP side + opening-range break
+//   * CVD, swing levels, ATR all session-anchored
 //
-// HOW TO BACKTEST
-//   1. Open a futures chart (MNQ1!, MNQ ZN26, etc.) on 1m or 3m.
-//   2. Pine Editor -> + -> Indicator -> delete template -> paste THIS file.
-//   3. Save -> "Add to chart".
-//   4. Click 'Strategy Tester' at the bottom of TradingView (next to Pine
-//      Editor). You will see Overview, Performance Summary, List of Trades,
-//      and Properties tabs.
-//   5. In the strategy settings (gear icon -> Properties tab) confirm:
-//        Initial Capital   = 50000
-//        Order Size        = 1 contract (script overrides with calculated qty)
-//        Pyramiding        = 0
-//        Commission        = 2.50 cash per contract (Apex MNQ round-turn est.)
-//        Slippage          = 2 ticks
-//   6. Inputs tab: pick instrument MNQ, set Max $ Risk/Trade, Min Score, etc.
-//   7. Look at "List of Trades" tab to inspect every signal: entry, exit,
-//      PnL, MAE/MFE. Use this to tune Min Score and TP multiples.
-//
-// IMPORTANT LIMITS
-//   * TradingView caps historical bars: ~20,000 on Premium and ~10,000 on
-//     lower plans. On 1m MNQ that is roughly 3-4 weeks. For more history,
-//     test on 5m / 15m or use the 'Deep Backtest' feature (Premium+).
-//   * request.security_lower_tf() requires Premium or higher plan to return
-//     intrabar data in history. On lower plans the delta engine will fall
-//     back to bar-level classification, which is less accurate.
-//   * Forward-test on a SIM/paper Apex eval first. The strategy tester
-//     assumes perfect fills - real PA fills will slip more.
+// This trades far more often than the previous version because nothing
+// requires a multi-bar historical regime. If it overtrades for your taste,
+// raise "Minimum Score to Fire" from 3 to 4 or 5.
 // =============================================================================
 
-strategy("Apex 50k Orderflow Strategy", "APX-OF Strat",
+strategy("Apex 50k OF Strategy (Session)", "APX-OF Sess",
      overlay              = true,
      initial_capital      = 50000,
      default_qty_type     = strategy.fixed,
@@ -51,74 +31,105 @@ strategy("Apex 50k Orderflow Strategy", "APX-OF Strat",
 grpOF       = "Orderflow Engine"
 ltfMode     = input.string("Auto", "Lower-TF Resolution", options = ["Auto","1S","5S","10S","15S","1","5"], group = grpOF)
 deltaSrc    = input.string("Close-vs-Mid", "Delta Classification", options = ["Close-vs-Open","Close-vs-Mid"], group = grpOF)
-imbThresh   = input.float(2.5, "Imbalance Ratio", minval = 1.5, maxval = 10.0, step = 0.1, group = grpOF)
-imbStack    = input.int(3, "Stacked Imbalance Count", minval = 2, maxval = 6, group = grpOF)
-absorbMult  = input.float(2.0, "Absorption Volume Mult", minval = 1.2, step = 0.1, group = grpOF)
-absorbRange = input.float(0.40, "Absorption Range Frac", minval = 0.05, maxval = 0.9, step = 0.05, group = grpOF)
-divLookback = input.int(20, "Divergence Lookback", minval = 5, maxval = 100, group = grpOF)
-cvdReset    = input.string("Session", "CVD Reset", options = ["Session","Daily","Never"], group = grpOF)
+imbThresh   = input.float(2.0, "Imbalance Ratio", minval = 1.3, maxval = 10.0, step = 0.1, group = grpOF)
+imbStack    = input.int(2, "Stacked Imbalance Count", minval = 1, maxval = 6, group = grpOF)
+absorbMult  = input.float(1.7, "Absorption Volume Mult", minval = 1.1, step = 0.1, group = grpOF)
+absorbRange = input.float(0.45, "Absorption Range Frac", minval = 0.05, maxval = 0.9, step = 0.05, group = grpOF)
 
-grpFilt     = "Trend / Session Filters"
-useTrendF   = input.bool(true, "Require EMA Trend Alignment", group = grpFilt)
-emaFast     = input.int(20,  "EMA Fast", minval = 5,  group = grpFilt)
-emaSlow     = input.int(50,  "EMA Slow", minval = 20, group = grpFilt)
-useVwapF    = input.bool(true, "Require VWAP Side", group = grpFilt)
-useSessF    = input.bool(true, "RTH Session Only", group = grpFilt)
-sessRTH     = input.session("0930-1130,1330-1600", "Active Session (NY)", group = grpFilt)
-useATRF     = input.bool(true, "Require Live Volatility", group = grpFilt)
-atrLen      = input.int(14, "ATR Length", group = grpFilt)
-atrFloor    = input.float(0.7, "ATR / AvgATR Floor", minval = 0.3, step = 0.05, group = grpFilt)
+grpSess     = "Session Anchors (intraday only)"
+sessRTH     = input.session("0930-1600", "RTH Session (NY)", group = grpSess)
+orMin       = input.int(15, "Opening Range Minutes", minval = 5, maxval = 60, group = grpSess, tooltip = "First X minutes after RTH open define the opening range used for bias.")
+useORBias   = input.bool(true, "Require Opening-Range Bias", group = grpSess, tooltip = "Longs only above OR mid, shorts only below.")
+useVwapF    = input.bool(true, "Require Session VWAP Side", group = grpSess)
+flatBy      = input.session("1555-1600", "Force-Flat Window (NY)", group = grpSess)
 
 grpScore    = "Confluence Scoring"
-minScore    = input.int(4, "Minimum Score to Fire", minval = 2, maxval = 8, group = grpScore)
-cooldownBars= input.int(5, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
+minScore    = input.int(3, "Minimum Score to Fire", minval = 1, maxval = 8, group = grpScore)
+cooldownBars= input.int(3, "Bars Cooldown Between Signals", minval = 0, group = grpScore)
 
 grpRisk     = "SL / TP Engine"
 slMode      = input.string("ATR + Swing", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = grpRisk)
 slATRmult   = input.float(1.2, "ATR Stop Multiplier", minval = 0.3, step = 0.1, group = grpRisk)
-swingLen    = input.int(10, "Swing Lookback", minval = 3, group = grpRisk)
+swingLen    = input.int(8, "Swing Lookback (bars)", minval = 3, maxval = 30, group = grpRisk)
+atrLen      = input.int(14, "ATR Length", group = grpRisk)
 tp1R        = input.float(1.0, "TP1 (R multiple)", minval = 0.3, step = 0.1, group = grpRisk)
 tp2R        = input.float(2.0, "TP2 (R multiple)", minval = 0.5, step = 0.1, group = grpRisk)
 tp3R        = input.float(3.0, "TP3 (R multiple)", minval = 1.0, step = 0.1, group = grpRisk)
 beAfterTP1  = input.bool(true, "Move SL to Break-Even after TP1", group = grpRisk)
 
 grpApex     = "Apex 50k Risk"
-trailDD     = input.float(2000.0, "Trailing Drawdown ($)", group = grpApex)
-ddLockProf  = input.float(2100.0, "Trailing Lock Profit ($)", group = grpApex)
-riskPerTrade= input.float(400.0,  "Max $ Risk / Trade", minval = 25.0, group = grpApex, tooltip = "Conservative=$250. Standard=$400. Aggressive=$500. Trail is $2,000.")
+trailDD     = input.float(2000.0, "Trailing Drawdown ($) [info]", group = grpApex, tooltip = "Displayed only - strategy doesn't halt on it.")
+riskPerTrade= input.float(400.0,  "Max $ Risk / Trade", minval = 25.0, group = grpApex)
 sym         = input.string("MNQ", "Instrument", options = ["MES","MNQ","MGC","MCL","ES","NQ","GC","CL"], group = grpApex)
 maxContracts= input.int(20, "Max Contracts (Apex Cap)", minval = 1, maxval = 40, group = grpApex)
-stopOnDD    = input.bool(true, "Halt Trading if Trail-DD Breached", group = grpApex)
 
 // ============================== INSTRUMENT MAP ===============================
 var float dpp = na
-var float ts  = na
 if sym == "MES"
     dpp := 5.0
-    ts  := 0.25
 else if sym == "MNQ"
     dpp := 2.0
-    ts  := 0.25
 else if sym == "MGC"
     dpp := 10.0
-    ts  := 0.10
 else if sym == "MCL"
     dpp := 100.0
-    ts  := 0.01
 else if sym == "ES"
     dpp := 50.0
-    ts  := 0.25
 else if sym == "NQ"
     dpp := 20.0
-    ts  := 0.25
 else if sym == "GC"
     dpp := 100.0
-    ts  := 0.10
 else if sym == "CL"
     dpp := 1000.0
-    ts  := 0.01
 
-// ============================== ENGINE =======================================
+// ============================== SESSION ANCHORS ==============================
+inSession   = not na(time(timeframe.period, sessRTH, "America/New_York"))
+isNewSess   = inSession and (na(inSession[1]) or not inSession[1])
+flatNow     = not na(time(timeframe.period, flatBy, "America/New_York"))
+
+// Bars since session open
+var int sessBar = 0
+sessBar := isNewSess ? 0 : inSession ? sessBar + 1 : 0
+
+// Session high/low
+var float sHigh = na
+var float sLow  = na
+if isNewSess
+    sHigh := high
+    sLow  := low
+else if inSession
+    sHigh := math.max(nz(sHigh, high), high)
+    sLow  := math.min(nz(sLow,  low),  low)
+
+// Opening range (first orMin minutes after session open)
+barMin    = math.max(1, timeframe.in_seconds(timeframe.period) / 60)
+orBars    = math.max(1, math.ceil(orMin / barMin))
+inOR      = inSession and sessBar < orBars
+var float orH = na
+var float orL = na
+if isNewSess
+    orH := high
+    orL := low
+else if inOR
+    orH := math.max(nz(orH, high), high)
+    orL := math.min(nz(orL, low),  low)
+orMid     = (orH + orL) / 2.0
+orReady   = inSession and sessBar >= orBars
+brokeORHi = orReady and close > orH
+brokeORLo = orReady and close < orL
+orBiasUp  = orReady and close > orMid
+orBiasDn  = orReady and close < orMid
+
+// Session VWAP - resets each session via anchored vwap
+sessAnchor = isNewSess
+vwap = ta.vwap(hlc3, sessAnchor)
+aboveVwap = inSession and close > vwap
+belowVwap = inSession and close < vwap
+
+// Session ATR (uses standard ATR but only inside session)
+atr = ta.atr(atrLen)
+
+// ============================== DELTA / CVD (session-reset) ==================
 f_autoLTF() =>
     tf = timeframe.in_seconds(timeframe.period)
     switch
@@ -162,14 +173,13 @@ delta    = buyVol - sellVol
 totalVol = buyVol + sellVol
 deltaPct = totalVol > 0 ? delta / totalVol : 0.0
 
-isNewRTH  = ta.change(time(timeframe.period, "0930-1600", "America/New_York")) != 0
-isNewDay  = ta.change(time("D")) != 0
-resetCVD  = cvdReset == "Session" ? isNewRTH : cvdReset == "Daily" ? isNewDay : false
+// Session-anchored CVD - resets on every new RTH open.
 var float cvd = 0.0
-cvd := resetCVD ? delta : nz(cvd[1]) + delta
-cvdRising  = cvd > cvd[1] and cvd[1] > cvd[2]
-cvdFalling = cvd < cvd[1] and cvd[1] < cvd[2]
+cvd := isNewSess ? delta : nz(cvd[1]) + delta
+cvdUp = cvd > nz(cvd[1])
+cvdDn = cvd < nz(cvd[1])
 
+// ============================== IMB / ABSORB =================================
 isBuyImb  = buyVol  > sellVol * imbThresh
 isSellImb = sellVol > buyVol  * imbThresh
 var int buyStreak  = 0
@@ -179,62 +189,48 @@ sellStreak := isSellImb ? sellStreak + 1 : 0
 stackedBuy  = buyStreak  >= imbStack
 stackedSell = sellStreak >= imbStack
 
-avgVol  = ta.sma(volume, 20)
-avgRng  = ta.sma(high - low, 20)
-barRng  = high - low
-isHeavy = volume > avgVol * absorbMult
-isTight = barRng < avgRng * absorbRange
-absorbBuy  = isHeavy and isTight and delta > 0 and close >= (high - barRng * 0.35)
-absorbSell = isHeavy and isTight and delta < 0 and close <= (low  + barRng * 0.35)
+// Session-only volume / range averages (use a short rolling window; falls back
+// to whatever bars are in the session up to current).
+sessVolAvg = ta.sma(volume, math.max(5, math.min(20, sessBar + 1)))
+sessRngAvg = ta.sma(high - low, math.max(5, math.min(20, sessBar + 1)))
+isHeavy = volume > sessVolAvg * absorbMult
+isTight = (high - low) < sessRngAvg * absorbRange
+absorbBuy  = isHeavy and isTight and delta > 0 and close >= (high - (high - low) * 0.35)
+absorbSell = isHeavy and isTight and delta < 0 and close <= (low  + (high - low) * 0.35)
 
-priceLo = ta.lowest(low,   divLookback)
-priceHi = ta.highest(high, divLookback)
-cvdLo   = ta.lowest(cvd,   divLookback)
-cvdHi   = ta.highest(cvd,  divLookback)
-bullDiv = low  <= priceLo and cvd > cvdLo and delta > 0
-bearDiv = high >= priceHi and cvd < cvdHi and delta < 0
-
-emaF = ta.ema(close, emaFast)
-emaS = ta.ema(close, emaSlow)
-trendUp   = emaF > emaS and close > emaS
-trendDown = emaF < emaS and close < emaS
-vwap = ta.vwap(hlc3)
-aboveVwap = close > vwap
-belowVwap = close < vwap
-atr     = ta.atr(atrLen)
-avgATR  = ta.sma(atr, 50)
-liveVol = atr >= avgATR * atrFloor
-inSession = not useSessF or not na(time(timeframe.period, sessRTH, "America/New_York"))
-
+// ============================== SCORING ======================================
+// Each true confirmation adds points. Higher-conviction signals = 2 pts.
 longScore  = 0
 shortScore = 0
-longScore  += stackedBuy   ? 2 : 0
-longScore  += absorbBuy    ? 2 : 0
-longScore  += bullDiv      ? 1 : 0
-longScore  += cvdRising    ? 1 : 0
-longScore  += deltaPct > 0.20 ? 1 : 0
-longScore  += (not useTrendF) or trendUp   ? 1 : 0
+longScore  += stackedBuy        ? 2 : 0
+longScore  += absorbBuy         ? 2 : 0
+longScore  += deltaPct > 0.20   ? 1 : 0
+longScore  += cvd > 0           ? 1 : 0
+longScore  += cvdUp             ? 1 : 0
 longScore  += (not useVwapF)  or aboveVwap ? 1 : 0
-shortScore += stackedSell  ? 2 : 0
-shortScore += absorbSell   ? 2 : 0
-shortScore += bearDiv      ? 1 : 0
-shortScore += cvdFalling   ? 1 : 0
-shortScore += deltaPct < -0.20 ? 1 : 0
-shortScore += (not useTrendF) or trendDown ? 1 : 0
-shortScore += (not useVwapF)  or belowVwap ? 1 : 0
-passFilters = inSession and ((not useATRF) or liveVol)
-rawLong  = passFilters and longScore  >= minScore and (not useTrendF or trendUp)   and (not useVwapF or aboveVwap)
-rawShort = passFilters and shortScore >= minScore and (not useTrendF or trendDown) and (not useVwapF or belowVwap)
+longScore  += (not useORBias) or orBiasUp  ? 1 : 0
+longScore  += brokeORHi         ? 1 : 0
 
-// ============================== APEX DD GUARD ================================
-// Halt new entries if simulated equity gets within $50 of trail cap.
-peakEq        = ta.highest(strategy.equity, 1000)
-trailCap      = math.min(peakEq - trailDD, strategy.initial_capital + ddLockProf)
-ddBreach      = stopOnDD and strategy.equity <= trailCap + 50
+shortScore += stackedSell       ? 2 : 0
+shortScore += absorbSell        ? 2 : 0
+shortScore += deltaPct < -0.20  ? 1 : 0
+shortScore += cvd < 0           ? 1 : 0
+shortScore += cvdDn             ? 1 : 0
+shortScore += (not useVwapF)  or belowVwap ? 1 : 0
+shortScore += (not useORBias) or orBiasDn  ? 1 : 0
+shortScore += brokeORLo         ? 1 : 0
+
+// Hard veto: if filter is on and it disagrees, kill that side entirely.
+longOK  = (not useVwapF  or aboveVwap) and (not useORBias or orBiasUp)
+shortOK = (not useVwapF  or belowVwap) and (not useORBias or orBiasDn)
+
+rawLong  = inSession and orReady and longOK  and longScore  >= minScore
+rawShort = inSession and orReady and shortOK and shortScore >= minScore
 
 // ============================== SIZE / SL / TP ===============================
-swingLow  = ta.lowest(low,  swingLen)
-swingHigh = ta.highest(high, swingLen)
+// Session-only swings (only look at bars in current session).
+swingLow  = ta.lowest(low,  math.min(swingLen, math.max(2, sessBar + 1)))
+swingHigh = ta.highest(high, math.min(swingLen, math.max(2, sessBar + 1)))
 atrStop   = atr * slATRmult
 f_long_sl(entry) =>
     sla = entry - atrStop
@@ -251,37 +247,35 @@ f_short_sl(entry) =>
         "Swing" => sls
         => math.max(sla, sls)
 
-// Force-flat at end of RTH (intraday rule).
-endOfRTH = not na(time(timeframe.period, "1555-1600", "America/New_York"))
-if endOfRTH and strategy.position_size != 0
+// Force flat at end of session.
+if flatNow and strategy.position_size != 0
     strategy.close_all(comment = "EOD flat")
 
-// Entries
-if rawLong and not ddBreach and strategy.position_size == 0
-    entry   = close
-    stopP   = f_long_sl(entry)
-    rDist   = entry - stopP
+// Long entry
+if rawLong and strategy.position_size == 0 and not flatNow
+    entry = close
+    stopP = f_long_sl(entry)
+    rDist = entry - stopP
     if rDist > 0
         qty = math.floor(riskPerTrade / (rDist * dpp))
         qty := math.max(1, math.min(qty, maxContracts))
         tp1 = entry + rDist * tp1R
         tp2 = entry + rDist * tp2R
         tp3 = entry + rDist * tp3R
-        // Split into thirds so the strategy tester can show partial fills.
+        // Split into thirds; last leg takes the remainder (handles odd qty).
         q1 = math.max(1, math.floor(qty / 3))
         q2 = math.max(1, math.floor(qty / 3))
-        q3 = math.max(1, qty - q1 - q2)
-        strategy.entry("L1", strategy.long, qty = q1, comment = "L1/3")
-        strategy.entry("L2", strategy.long, qty = q2, comment = "L2/3")
-        strategy.entry("L3", strategy.long, qty = q3, comment = "L3/3")
-        strategy.exit("X-L1", from_entry = "L1", limit = tp1, stop = stopP)
-        strategy.exit("X-L2", from_entry = "L2", limit = tp2, stop = beAfterTP1 ? entry : stopP)
-        strategy.exit("X-L3", from_entry = "L3", limit = tp3, stop = beAfterTP1 ? entry : stopP)
+        // ONE entry for full qty, THREE exits scale out (1/3, 1/3, runner).
+        strategy.entry("L", strategy.long, qty = qty)
+        strategy.exit("X-TP1", from_entry = "L", qty = q1, limit = tp1, stop = stopP)
+        strategy.exit("X-TP2", from_entry = "L", qty = q2, limit = tp2, stop = beAfterTP1 ? entry : stopP)
+        strategy.exit("X-TP3", from_entry = "L",            limit = tp3, stop = beAfterTP1 ? entry : stopP)
 
-if rawShort and not ddBreach and strategy.position_size == 0
-    entry   = close
-    stopP   = f_short_sl(entry)
-    rDist   = stopP - entry
+// Short entry
+if rawShort and strategy.position_size == 0 and not flatNow
+    entry = close
+    stopP = f_short_sl(entry)
+    rDist = stopP - entry
     if rDist > 0
         qty = math.floor(riskPerTrade / (rDist * dpp))
         qty := math.max(1, math.min(qty, maxContracts))
@@ -290,18 +284,16 @@ if rawShort and not ddBreach and strategy.position_size == 0
         tp3 = entry - rDist * tp3R
         q1 = math.max(1, math.floor(qty / 3))
         q2 = math.max(1, math.floor(qty / 3))
-        q3 = math.max(1, qty - q1 - q2)
-        strategy.entry("S1", strategy.short, qty = q1, comment = "S1/3")
-        strategy.entry("S2", strategy.short, qty = q2, comment = "S2/3")
-        strategy.entry("S3", strategy.short, qty = q3, comment = "S3/3")
-        strategy.exit("X-S1", from_entry = "S1", limit = tp1, stop = stopP)
-        strategy.exit("X-S2", from_entry = "S2", limit = tp2, stop = beAfterTP1 ? entry : stopP)
-        strategy.exit("X-S3", from_entry = "S3", limit = tp3, stop = beAfterTP1 ? entry : stopP)
+        strategy.entry("S", strategy.short, qty = qty)
+        strategy.exit("X-TP1", from_entry = "S", qty = q1, limit = tp1, stop = stopP)
+        strategy.exit("X-TP2", from_entry = "S", qty = q2, limit = tp2, stop = beAfterTP1 ? entry : stopP)
+        strategy.exit("X-TP3", from_entry = "S",            limit = tp3, stop = beAfterTP1 ? entry : stopP)
 
-// Visuals (kept lightweight on strategy script).
-plot(vwap, "VWAP", color = color.new(color.yellow, 0))
-plot(emaF, "EMA F", color = color.new(color.aqua,    30))
-plot(emaS, "EMA S", color = color.new(color.fuchsia, 30))
-plotshape(rawLong  and strategy.position_size == 0 and not ddBreach, "OF LONG",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.small)
-plotshape(rawShort and strategy.position_size == 0 and not ddBreach, "OF SHORT", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.small)
-bgcolor(ddBreach ? color.new(color.red, 90) : na, title = "DD Breach")
+// ============================== VISUALS ======================================
+plot(inSession ? vwap : na, "Session VWAP", color = color.new(color.yellow, 0), linewidth = 2)
+plot(inSession ? orH  : na, "OR High",      color = color.new(color.aqua,    0), style = plot.style_linebr)
+plot(inSession ? orL  : na, "OR Low",       color = color.new(color.aqua,    0), style = plot.style_linebr)
+plot(inSession ? orMid: na, "OR Mid",       color = color.new(color.gray,   30), style = plot.style_linebr)
+plotshape(rawLong  and strategy.position_size == 0, "OF LONG",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.small)
+plotshape(rawShort and strategy.position_size == 0, "OF SHORT", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.small)
+bgcolor(inSession ? na : color.new(color.gray, 92), title = "Outside Session")
