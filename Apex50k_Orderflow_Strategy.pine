@@ -84,7 +84,8 @@ else if sym == "CL"
 
 // ============================== SESSION ANCHORS ==============================
 inSession   = not na(time(timeframe.period, sessRTH, "America/New_York"))
-isNewSess   = inSession and (na(inSession[1]) or not inSession[1])
+sessFlag    = inSession ? 1 : 0
+isNewSess   = ta.change(sessFlag) > 0
 flatNow     = not na(time(timeframe.period, flatBy, "America/New_York"))
 
 // Bars since session open
