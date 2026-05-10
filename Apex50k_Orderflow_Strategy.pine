@@ -1,16 +1,27 @@
 //@version=6
 // =============================================================================
-// Apex 50k Orderflow Strategy - tuned for 20-contract sizing + DD safety
+// Apex 50k OF Strategy v2 - multi-pattern, HTF-biased, regime-filtered
 // -----------------------------------------------------------------------------
-// Defaults:
-//   - ATR-only stop, 1.0x ATR (tight) -> sizes to 15-20 micro contracts
-//   - $400 risk/trade, $250 with cushion-scale fallback near DD wall
-//   - Daily loss halt at $800, cushion halt at $500 from trail floor
-//   - 1R / 2R / 4R targets, BE-after-TP1 OFF (let runners run)
-//   - 1% margin so 20 contracts actually fit on a 50k account
+// Two uncorrelated entry patterns running together:
+//   1. OR Breakout - first close beyond opening range with strength filter
+//   2. VWAP Pullback - retest of VWAP in established trend, reversal bar
+//
+// Filters (all toggleable):
+//   - HTF Bias: trades only with the 15m EMA50 trend direction
+//   - Time-of-Day: skip first 15min chop, lunch (12-13:30 NY), last 30min
+//   - Volatility Regime: skip dead bars AND extreme news/spike bars
+//   - Session VWAP veto: longs only above VWAP, shorts only below
+//
+// Apex 50k Static protection:
+//   - Daily-loss halt, trail-cushion halt, defensive size scaling
+//   - Real Apex Static-50k trail floor formula
+//   - 1% margin so 20 contracts actually fit on $50k
+//
+// Exits: 1R / 2R / 4R partial scale-out, with optional trailing stop on the
+// final 1/3 (TP3) once TP2 fills.
 // =============================================================================
 
-strategy("Apex 50k OF Strategy", "APX-OF",
+strategy("Apex 50k OF v2", "APX-OF v2",
      overlay              = true,
      initial_capital      = 50000,
      default_qty_type     = strategy.fixed,
@@ -27,20 +38,36 @@ strategy("Apex 50k OF Strategy", "APX-OF",
      max_lines_count      = 500)
 
 // ============================== INPUTS =======================================
-gSig      = "Signal"
-useORBrk  = input.bool(true,  "OR Breakout Trigger",  group = gSig)
-useOFTrig = input.bool(false, "Orderflow Triggers (imb/absorb/delta)", group = gSig)
-useVwap   = input.bool(true,  "Require VWAP Side (veto)",  group = gSig)
-useOFConf = input.bool(false, "Require Orderflow Confirm on OR Break", group = gSig)
-brkMinRng = input.float(0.5,  "Min Breakout Bar Range / ATR",  minval = 0.0, step = 0.1, group = gSig, tooltip = "Filters wick fakeouts. Bar's range must be at least this fraction of ATR. 0 = disabled.")
+gPat      = "Entry Patterns"
+useORBrk  = input.bool(true,  "1. OR Breakout",   group = gPat)
+usePull   = input.bool(true,  "2. VWAP Pullback", group = gPat)
+useOFTrig = input.bool(false, "3. Pure Orderflow Triggers", group = gPat, tooltip = "Off by default - bar-level orderflow data is too noisy.")
+
+gFilt     = "Filters"
+useHTFBias  = input.bool(true,  "HTF Bias Filter (15m EMA50)", group = gFilt, tooltip = "Only longs in HTF uptrend; only shorts in HTF downtrend.")
+htfTF       = input.timeframe("15", "HTF Timeframe", group = gFilt)
+htfEmaLen   = input.int(50,    "HTF EMA Length",      group = gFilt)
+useVwap     = input.bool(true, "VWAP Veto",            group = gFilt)
+useTimeFilt = input.bool(true, "Time-of-Day Filter",   group = gFilt)
+skipFirstMin= input.int(15,    "Skip First N Min after Open", minval = 0, group = gFilt)
+skipLunch   = input.bool(true, "Skip Lunch (12:00-13:30 NY)", group = gFilt)
+skipLastMin = input.int(30,    "Skip Last N Min before Close", minval = 0, group = gFilt)
+useVolReg   = input.bool(true, "Volatility Regime Filter", group = gFilt)
+atrMin      = input.float(0.5, "ATR Floor (vs 50-bar avg)",  minval = 0.1, step = 0.05, group = gFilt)
+atrMax      = input.float(2.5, "ATR Ceiling (vs 50-bar avg)", minval = 1.0, step = 0.1, group = gFilt)
+
+gSig      = "Signal Tweaks"
+brkMinRng = input.float(0.5,  "OR Break Min Bar Range / ATR", minval = 0.0, step = 0.1, group = gSig)
+pullDepth = input.float(0.3,  "Pullback Depth / ATR",   minval = 0.05, step = 0.05, group = gSig, tooltip = "Pullback must dip within this ATR fraction of VWAP to qualify.")
+pullStreak= input.int(5,      "Min Trend Streak for Pullback", minval = 3, group = gSig, tooltip = "Bars on the trending side of VWAP required before a pullback counts.")
 allowLong = input.bool(true,  "Allow Long Entries",  group = gSig)
 allowShort= input.bool(true,  "Allow Short Entries", group = gSig)
 
-gOF       = "Orderflow"
+gOF       = "Orderflow Engine"
 ltfMode   = input.string("Auto", "Lower-TF", options = ["Auto","1S","5S","15S","1","5"], group = gOF)
-imbThresh = input.float(1.8, "Imbalance Ratio",        minval = 1.3, step = 0.1, group = gOF)
-imbStack  = input.int(2,     "Stacked Imbalance Bars", minval = 1, maxval = 5, group = gOF)
-absVolMul = input.float(1.7, "Absorption Vol Mult",    minval = 1.1, step = 0.1, group = gOF)
+imbThresh = input.float(1.8, "Imbalance Ratio",  minval = 1.3, step = 0.1, group = gOF)
+imbStack  = input.int(2,     "Stacked Imb Bars", minval = 1, maxval = 5, group = gOF)
+absVolMul = input.float(1.7, "Absorption Vol Mult", minval = 1.1, step = 0.1, group = gOF)
 strongDel = input.float(0.20, "Strong Delta % Threshold", minval = 0.10, step = 0.05, group = gOF)
 
 gSess     = "Session"
@@ -49,15 +76,17 @@ flatBy    = input.session("1555-1600", "Force-Flat (NY)", group = gSess)
 orMin     = input.int(15, "Opening Range Minutes", minval = 1, maxval = 60, group = gSess)
 
 gRisk     = "Risk / SL / TP"
-slMode    = input.string("ATR", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = gRisk, tooltip = "ATR-only gives consistent tight stops -> sizes up to ~20 contracts. Swing-based can produce very wide stops -> small contracts.")
-slATR     = input.float(1.0, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk, tooltip = "Tighter = bigger position size. 1.0 default targets 15-20 micro contracts.")
+slMode    = input.string("ATR", "Stop Mode", options = ["ATR","Swing","ATR + Swing"], group = gRisk)
+slATR     = input.float(1.0, "ATR Stop Mult", minval = 0.3, step = 0.1, group = gRisk)
 swingLen  = input.int(8,     "Swing Lookback", minval = 3, maxval = 30, group = gRisk)
 atrLen    = input.int(14,    "ATR Length", group = gRisk)
 tp1R      = input.float(1.0, "TP1 R", group = gRisk)
 tp2R      = input.float(2.0, "TP2 R", group = gRisk)
-tp3R      = input.float(4.0, "TP3 R", group = gRisk, tooltip = "Bigger TP3 captures runner trades that justify the strategy edge.")
+tp3R      = input.float(4.0, "TP3 R", group = gRisk)
 beAfter1  = input.bool(false, "Move SL to BE after TP1", group = gRisk)
-cooldown  = input.int(5,     "Cooldown Bars", minval = 0, group = gRisk)
+useTrail  = input.bool(true,  "Trail Stop on Runner after TP2", group = gRisk, tooltip = "After TP2 fills, the remaining 1/3 trails with ATR for max-capture.")
+trailMult = input.float(1.5,  "Runner Trail ATR Mult", minval = 0.5, step = 0.1, group = gRisk)
+cooldown  = input.int(5,      "Cooldown Bars", minval = 0, group = gRisk)
 
 gApex     = "Apex 50k Sizing"
 riskTrade = input.float(400.0, "Max $ Risk / Trade", minval = 25.0, group = gApex)
@@ -66,14 +95,14 @@ ovrPV     = input.float(0.0,   "Override $/Point (0 = auto)", minval = 0.0, grou
 
 gProt     = "Apex DD Protection"
 trailDD       = input.float(2000.0, "Trailing Drawdown ($)",     group = gProt)
-ddLockProf    = input.float(2100.0, "Trail Lock Profit ($)",     group = gProt, tooltip = "Apex Static 50k: trail floor freezes once peak hits start + this amount.")
+ddLockProf    = input.float(2100.0, "Trail Lock Profit ($)",     group = gProt)
 useDailyHalt  = input.bool(true,    "Halt on Daily Loss",        group = gProt)
-maxDailyLoss  = input.float(800.0,  "Max Daily Loss ($)",        minval = 50, group = gProt, tooltip = "Halt new entries for the rest of the day if cumulative loss reaches this amount. ~2 losing trades worth.")
+maxDailyLoss  = input.float(800.0,  "Max Daily Loss ($)",        minval = 50, group = gProt)
 useCushionHalt= input.bool(true,    "Halt on Low Cushion",       group = gProt)
-trailCushion  = input.float(500.0,  "Halt Cushion ($)",          minval = 0, group = gProt, tooltip = "Halt new entries if equity is within this amount of the trail floor.")
-useScaleDown  = input.bool(true,    "Scale Down Size at 2x Cushion", group = gProt, tooltip = "Halve position size when cushion is below 2x halt threshold (\$1000 by default).")
+trailCushion  = input.float(500.0,  "Halt Cushion ($)",          minval = 0, group = gProt)
+useScaleDown  = input.bool(true,    "Scale Down Size at 2x Cushion", group = gProt)
 
-// ============================== POINT VALUE (auto) ===========================
+// ============================== POINT VALUE ==================================
 dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
 
 // ============================== SESSION ======================================
@@ -104,6 +133,26 @@ aboveVwap = inSess and close > vwap
 belowVwap = inSess and close < vwap
 
 atr = ta.atr(atrLen)
+
+// ============================== HTF BIAS =====================================
+// 15m (or chosen TF) EMA50 trend determines which direction to favor.
+htfClose = request.security(syminfo.tickerid, htfTF, close, lookahead = barmerge.lookahead_off)
+htfEMA   = request.security(syminfo.tickerid, htfTF, ta.ema(close, htfEmaLen), lookahead = barmerge.lookahead_off)
+htfBull  = not na(htfEMA) and htfClose > htfEMA
+htfBear  = not na(htfEMA) and htfClose < htfEMA
+
+// ============================== TIME-OF-DAY ==================================
+nyHr   = hour(time, "America/New_York")
+nyMin  = minute(time, "America/New_York")
+nyTM   = nyHr * 60 + nyMin
+inLunch     = skipLunch and nyTM >= 12 * 60 and nyTM < 13 * 60 + 30
+inFirstSkip = nyTM < (9 * 60 + 30) + skipFirstMin
+inLastSkip  = nyTM >= (16 * 60) - skipLastMin
+goodTime    = not useTimeFilt or (not inLunch and not inFirstSkip and not inLastSkip)
+
+// ============================== VOL REGIME ===================================
+atrAvg = ta.sma(atr, 50)
+volOK  = not useVolReg or (not na(atrAvg) and atr >= atrAvg * atrMin and atr <= atrAvg * atrMax)
 
 // ============================== ORDERFLOW ====================================
 f_autoLTF() =>
@@ -158,43 +207,60 @@ absorbSell = heavyV and tightR and delta < 0 and close <= low  + (high - low) * 
 ofLong  = stackedBuy  or absorbBuy  or deltaPct >  strongDel
 ofShort = stackedSell or absorbSell or deltaPct < -strongDel
 
-// ============================== TRIGGERS =====================================
-brokeHi = orReady and not na(orH) and close > orH
-brokeLo = orReady and not na(orL) and close < orL
-strongBar = brkMinRng <= 0 or (high - low) > atr * brkMinRng
+// ============================== PATTERN 1: OR BREAKOUT =======================
+brokeHi    = orReady and not na(orH) and close > orH
+brokeLo    = orReady and not na(orL) and close < orL
+strongBar  = brkMinRng <= 0 or (high - low) > atr * brkMinRng
 firstBrkUp = brokeHi and not brokeHi[1] and strongBar
 firstBrkDn = brokeLo and not brokeLo[1] and strongBar
 
-orTrigLong   = useORBrk and firstBrkUp and (not useOFConf or ofLong)
-orTrigShort  = useORBrk and firstBrkDn and (not useOFConf or ofShort)
-ofTrigLong   = useOFTrig and ofLong  and orReady
-ofTrigShort  = useOFTrig and ofShort and orReady
+orPatLong  = useORBrk and firstBrkUp
+orPatShort = useORBrk and firstBrkDn
 
-triggerLong  = orTrigLong  or ofTrigLong
-triggerShort = orTrigShort or ofTrigShort
+// ============================== PATTERN 2: VWAP PULLBACK =====================
+// Track how long price has been on each side of VWAP in this session.
+var int sessAboveVwap = 0
+var int sessBelowVwap = 0
+sessAboveVwap := isNewSess ? 0 : (close > vwap ? sessAboveVwap + 1 : 0)
+sessBelowVwap := isNewSess ? 0 : (close < vwap ? sessBelowVwap + 1 : 0)
+
+// Pullback long: was trending above VWAP, this bar dipped to within depth*ATR
+// of VWAP, then closed back above VWAP with a bullish candle.
+pullLong  = usePull and orReady and sessAboveVwap[1] >= pullStreak and low <= vwap + atr * pullDepth and close > vwap and close > open
+pullShort = usePull and orReady and sessBelowVwap[1] >= pullStreak and high >= vwap - atr * pullDepth and close < vwap and close < open
+
+// ============================== PATTERN 3: PURE ORDERFLOW ====================
+ofPatLong  = useOFTrig and ofLong  and orReady
+ofPatShort = useOFTrig and ofShort and orReady
+
+// ============================== COMBINED TRIGGER + FILTERS ===================
+triggerLong  = orPatLong  or pullLong  or ofPatLong
+triggerShort = orPatShort or pullShort or ofPatShort
 
 vetoLong  = not useVwap or aboveVwap
 vetoShort = not useVwap or belowVwap
 
-rawLong  = allowLong  and inSess and not flatNow and triggerLong  and vetoLong
-rawShort = allowShort and inSess and not flatNow and triggerShort and vetoShort
+htfOKLong  = not useHTFBias or htfBull
+htfOKShort = not useHTFBias or htfBear
+
+allFiltersLong  = goodTime and volOK and vetoLong  and htfOKLong
+allFiltersShort = goodTime and volOK and vetoShort and htfOKShort
+
+rawLong  = allowLong  and inSess and not flatNow and triggerLong  and allFiltersLong
+rawShort = allowShort and inSess and not flatNow and triggerShort and allFiltersShort
 
 var int lastSig = -1000
 canFire = bar_index - lastSig >= cooldown
 
 // ============================== APEX PROTECTION ==============================
-// Day PnL tracking - resets each session.
 var float dayStartEq = na
 if isNewSess
     dayStartEq := strategy.equity
 dayPnL = strategy.equity - nz(dayStartEq, strategy.initial_capital)
 
-// Peak equity for trailing-drawdown calc.
 var float peakEq = strategy.initial_capital
 peakEq := math.max(peakEq, strategy.equity)
 
-// Apex Static 50k trail: peak caps at start+lockProfit; below that it trails
-// peak - trailDD; above lock, the floor freezes at start+lockProfit-trailDD.
 peakForTrail = math.min(peakEq, strategy.initial_capital + ddLockProf)
 trailFloor   = peakForTrail - trailDD
 cushion      = strategy.equity - trailFloor
@@ -203,7 +269,6 @@ dailyHalt   = useDailyHalt and dayPnL <= -maxDailyLoss
 cushionHalt = useCushionHalt and cushion < trailCushion
 canTrade    = not dailyHalt and not cushionHalt
 
-// Defensive size scaling - halve qty when cushion is in the danger zone.
 sizeScale = useScaleDown and cushion < trailCushion * 2.0 ? 0.5 : 1.0
 
 // ============================== SL / TP ======================================
@@ -235,10 +300,14 @@ var int   aQ1  = 0
 var int   aQ2  = 0
 var int   aDir = 0
 var bool  aTp1 = false
+var bool  aTp2 = false
+var float aTrail = na
 
 if strategy.position_size == 0
     aDir := 0
     aTp1 := false
+    aTp2 := false
+    aTrail := na
 
 if flatNow and strategy.position_size != 0
     strategy.close_all(comment = "EOD flat")
@@ -262,6 +331,8 @@ if rawLong and canFire and strategy.position_size == 0 and not flatNow and canTr
         aQ2  := q2
         aDir := 1
         aTp1 := false
+        aTp2 := false
+        aTrail := na
         lastSig := bar_index
         strategy.entry("L", strategy.long, qty = qty)
         strategy.exit("L-TP1", from_entry = "L", qty = q1, limit = aT1, stop = aS)
@@ -286,67 +357,97 @@ if rawShort and canFire and strategy.position_size == 0 and not flatNow and canT
         aQ2  := q2
         aDir := -1
         aTp1 := false
+        aTp2 := false
+        aTrail := na
         lastSig := bar_index
         strategy.entry("S", strategy.short, qty = qty)
         strategy.exit("S-TP1", from_entry = "S", qty = q1, limit = aT1, stop = aS)
         strategy.exit("S-TP2", from_entry = "S", qty = q2, limit = aT2, stop = aS)
         strategy.exit("S-TP3", from_entry = "S",            limit = aT3, stop = aS)
 
-// ============================== BE-AFTER-TP1 =================================
+// ============================== TP1/TP2 DETECTION + DYN STOP =================
 if aDir ==  1 and not aTp1 and not na(aT1) and high >= aT1
     aTp1 := true
 if aDir == -1 and not aTp1 and not na(aT1) and low  <= aT1
     aTp1 := true
+if aDir ==  1 and not aTp2 and not na(aT2) and high >= aT2
+    aTp2 := true
+if aDir == -1 and not aTp2 and not na(aT2) and low  <= aT2
+    aTp2 := true
 
-dynStop = beAfter1 and aTp1 ? aE : aS
+// Trailing stop on TP3 portion: starts after TP2 fills, trails ATR-distance.
+if useTrail and aTp2 and aDir == 1
+    newTrail = close - atr * trailMult
+    aTrail := math.max(nz(aTrail, newTrail), newTrail)
+if useTrail and aTp2 and aDir == -1
+    newTrail = close + atr * trailMult
+    aTrail := math.min(nz(aTrail, newTrail), newTrail)
+
+// Dynamic stop: BE after TP1 (optional), trail after TP2 (optional).
+dynStop2 = beAfter1 and aTp1 ? aE : aS
+dynStop3 = useTrail and aTp2 and not na(aTrail) ? aTrail : (beAfter1 and aTp1 ? aE : aS)
 
 if aDir ==  1 and strategy.position_size > 0 and bar_index > lastSig
     strategy.exit("L-TP1", from_entry = "L", qty = aQ1, limit = aT1, stop = aS)
-    strategy.exit("L-TP2", from_entry = "L", qty = aQ2, limit = aT2, stop = dynStop)
-    strategy.exit("L-TP3", from_entry = "L",            limit = aT3, stop = dynStop)
+    strategy.exit("L-TP2", from_entry = "L", qty = aQ2, limit = aT2, stop = dynStop2)
+    strategy.exit("L-TP3", from_entry = "L",            limit = aT3, stop = dynStop3)
 if aDir == -1 and strategy.position_size < 0 and bar_index > lastSig
     strategy.exit("S-TP1", from_entry = "S", qty = aQ1, limit = aT1, stop = aS)
-    strategy.exit("S-TP2", from_entry = "S", qty = aQ2, limit = aT2, stop = dynStop)
-    strategy.exit("S-TP3", from_entry = "S",            limit = aT3, stop = dynStop)
+    strategy.exit("S-TP2", from_entry = "S", qty = aQ2, limit = aT2, stop = dynStop2)
+    strategy.exit("S-TP3", from_entry = "S",            limit = aT3, stop = dynStop3)
 
 // ============================== VISUALS ======================================
 plot(inSess ? vwap : na, "VWAP",    color = color.new(color.yellow, 0), linewidth = 2)
 plot(inSess ? orH  : na, "OR High", color = color.new(color.aqua,    0), style = plot.style_linebr)
 plot(inSess ? orL  : na, "OR Low",  color = color.new(color.aqua,    0), style = plot.style_linebr)
+plot(inSess and useHTFBias ? htfEMA : na, "HTF EMA", color = color.new(color.fuchsia, 30), linewidth = 1)
 
 plotshape(rawLong  and canFire and canTrade and strategy.position_size == 0, "BUY",  shape.labelup,   location.belowbar, color.new(color.green, 0), text = "BUY",  textcolor = color.white, size = size.small)
 plotshape(rawShort and canFire and canTrade and strategy.position_size == 0, "SELL", shape.labeldown, location.abovebar, color.new(color.red,   0), text = "SELL", textcolor = color.white, size = size.small)
 
+// Pattern dots so you can see which trigger fired.
+plotshape(orPatLong,  "ORBL",  shape.circle, location.belowbar, color.new(color.green,  60), size = size.tiny)
+plotshape(pullLong,   "PullL", shape.cross,  location.belowbar, color.new(color.lime,   30), size = size.tiny)
+plotshape(orPatShort, "ORBS",  shape.circle, location.abovebar, color.new(color.red,    60), size = size.tiny)
+plotshape(pullShort,  "PullS", shape.cross,  location.abovebar, color.new(color.maroon, 30), size = size.tiny)
+
 bgcolor(inSess ? na : color.new(color.gray, 92), title = "Outside Session")
 bgcolor(dailyHalt or cushionHalt ? color.new(color.red, 88) : na, title = "Halt")
+bgcolor(inSess and not goodTime ? color.new(color.orange, 92) : na, title = "Bad Time")
+bgcolor(inSess and not volOK ? color.new(color.purple, 92) : na, title = "Vol Regime Block")
 
 // ============================== DIAG TABLE ===================================
 if barstate.islast
-    var table dbg = table.new(position.bottom_right, 2, 12, border_width = 1)
+    var table dbg = table.new(position.bottom_right, 2, 14, border_width = 1)
     bgL = color.new(color.silver, 30)
     bgV = color.new(color.white,  0)
-    table.cell(dbg, 0, 0, "DIAG",                              bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+    table.cell(dbg, 0, 0, "DIAG v2",                   bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
     table.cell(dbg, 1, 0, str.tostring(strategy.closedtrades) + " trades", bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
-    table.cell(dbg, 0, 1, "Equity",                bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 1, "Equity",       bgcolor = bgL, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 1, 1, "$" + str.tostring(strategy.equity, "#.##"), bgcolor = bgV, text_color = strategy.equity >= strategy.initial_capital ? color.green : color.red, text_size = size.tiny)
-    table.cell(dbg, 0, 2, "Peak",                  bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 2, "$" + str.tostring(peakEq, "#.##"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 0, 3, "Trail floor",           bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 3, "$" + str.tostring(trailFloor, "#.##"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 0, 4, "Cushion",               bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 4, "$" + str.tostring(cushion, "#.##"), bgcolor = bgV, text_color = cushion < trailCushion ? color.red : cushion < trailCushion * 2 ? color.orange : color.green, text_size = size.tiny)
-    table.cell(dbg, 0, 5, "Day PnL",               bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 5, "$" + str.tostring(dayPnL, "#.##"), bgcolor = bgV, text_color = dayPnL >= 0 ? color.green : color.red, text_size = size.tiny)
-    table.cell(dbg, 0, 6, "Symbol $/pt",           bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 6, "$" + str.tostring(dpp, "#.##"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 0, 7, "Size scale",            bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 7, str.tostring(sizeScale * 100, "#") + "%", bgcolor = bgV, text_color = sizeScale < 1.0 ? color.orange : color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 2, "Cushion",      bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 2, "$" + str.tostring(cushion, "#.##"), bgcolor = bgV, text_color = cushion < trailCushion ? color.red : cushion < trailCushion * 2 ? color.orange : color.green, text_size = size.tiny)
+    table.cell(dbg, 0, 3, "Day PnL",      bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 3, "$" + str.tostring(dayPnL, "#.##"), bgcolor = bgV, text_color = dayPnL >= 0 ? color.green : color.red, text_size = size.tiny)
+    table.cell(dbg, 0, 4, "$/pt",         bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 4, "$" + str.tostring(dpp, "#.##"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 5, "Size scale",   bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 5, str.tostring(sizeScale * 100, "#") + "%", bgcolor = bgV, text_color = sizeScale < 1.0 ? color.orange : color.black, text_size = size.tiny)
     haltStr = dailyHalt ? "DAILY-LOSS" : cushionHalt ? "CUSHION" : flatNow ? "EOD WINDOW" : "OK"
-    table.cell(dbg, 0, 8, "Halt",                  bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 8, haltStr, bgcolor = bgV, text_color = haltStr == "OK" ? color.green : color.red, text_size = size.tiny)
-    table.cell(dbg, 0, 9, "In RTH",                bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 9, inSess ? "YES" : "NO", bgcolor = bgV, text_color = inSess ? color.green : color.red, text_size = size.tiny)
-    table.cell(dbg, 0, 10, "OR ready",             bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 6, "Halt",         bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 6, haltStr, bgcolor = bgV, text_color = haltStr == "OK" ? color.green : color.red, text_size = size.tiny)
+    table.cell(dbg, 0, 7, "HTF bias",     bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    htfStr = htfBull ? "BULL" : htfBear ? "BEAR" : "FLAT"
+    table.cell(dbg, 1, 7, htfStr, bgcolor = bgV, text_color = htfBull ? color.green : htfBear ? color.red : color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 8, "Vol regime",   bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 8, volOK ? "OK" : "BLOCKED", bgcolor = bgV, text_color = volOK ? color.green : color.red, text_size = size.tiny)
+    table.cell(dbg, 0, 9, "Time window",  bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 9, goodTime ? "OK" : (inLunch ? "LUNCH" : inFirstSkip ? "OPEN" : "CLOSE"), bgcolor = bgV, text_color = goodTime ? color.green : color.red, text_size = size.tiny)
+    table.cell(dbg, 0, 10, "OR ready",    bgcolor = bgL, text_color = color.black, text_size = size.tiny)
     table.cell(dbg, 1, 10, orReady ? "YES" : "NO", bgcolor = bgV, text_color = orReady ? color.green : color.red, text_size = size.tiny)
-    table.cell(dbg, 0, 11, "Trig L/S",             bgcolor = bgL, text_color = color.black, text_size = size.tiny)
-    table.cell(dbg, 1, 11, (triggerLong ? "Y" : "N") + " / " + (triggerShort ? "Y" : "N"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 11, "OR pat L/S",  bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 11, (orPatLong ? "Y" : "N") + " / " + (orPatShort ? "Y" : "N"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 12, "Pull L/S",    bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 12, (pullLong ? "Y" : "N") + " / " + (pullShort ? "Y" : "N"), bgcolor = bgV, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 0, 13, "Cooldown",    bgcolor = bgL, text_color = color.black, text_size = size.tiny)
+    table.cell(dbg, 1, 13, canFire ? "READY" : "WAIT", bgcolor = bgV, text_color = canFire ? color.green : color.red, text_size = size.tiny)
