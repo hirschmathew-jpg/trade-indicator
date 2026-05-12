@@ -43,7 +43,7 @@ allowLong  = input.bool(true, "Allow BUY Signals",  group = gStrat)
 allowShort = input.bool(true, "Allow SELL Signals", group = gStrat)
 volConfMul = input.float(1.0, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat)
 cooldown   = input.int(3,     "Cooldown Bars Between Signals", minval = 0, group = gStrat)
-minVAbars  = input.int(5,     "Min Bars Into Session Before Signaling", minval = 1, group = gStrat)
+minVAbars  = input.int(3,     "Min Bars Into Session Before Signaling", minval = 1, group = gStrat)
 
 gMR   = "Mean Reversion"
 mrProxATR  = input.float(0.5, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR)
@@ -67,13 +67,13 @@ ovrPV       = input.float(0.0, "Override $/Point (0 = auto)", minval = 0.0, grou
 showBracket = input.bool(true, "Draw SL/TP Bracket on Signal", group = gTP)
 
 gSess = "Session"
-useSess    = input.bool(true,  "Restrict to Session (RTH)", group = gSess)
+useSess    = input.bool(false, "Restrict to Session (RTH)", group = gSess, tooltip = "OFF (default) = 24h, profile resets each chart day. Turn ON only if your session+tz matches the symbol exactly.")
 sessStr    = input.session("0930-1555", "Session (NY)", group = gSess)
 sessTZ     = input.string("America/New_York", "Timezone", options = ["America/New_York","America/Chicago","Europe/London","Asia/Tokyo","UTC","Australia/Sydney"], group = gSess)
 
 gAnchor = "Daily Anchor (Guaranteed Signal)"
 forceDaily = input.bool(true, "Force at least one signal per day", group = gAnchor, tooltip = "If no pattern fires by the anchor bar, show a momentum-based signal.")
-anchorBar  = input.int(5,    "Anchor Bar (bars after session open)", minval = 1, maxval = 200, group = gAnchor)
+anchorBar  = input.int(3,    "Anchor Bar (bars after session open)", minval = 1, maxval = 200, group = gAnchor)
 maxPerDay  = input.int(1,    "Max Signals per Session Day", minval = 1, maxval = 10, group = gAnchor)
 
 gViz  = "Visuals"
@@ -85,9 +85,15 @@ dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
 maxCon = maxConOvr > 0 ? maxConOvr : (autoCap ? (dpp >= 10.0 ? maxConMini : maxConMicro) : maxConMicro)
 
 // ============================== SESSION ======================================
-inSess    = useSess ? not na(time(timeframe.period, sessStr, sessTZ)) : true
-sessFlag  = inSess ? 1 : 0
-isNewSess = useSess ? (ta.change(sessFlag) > 0) : (ta.change(dayofmonth) != 0)
+rawInSess    = useSess ? not na(time(timeframe.period, sessStr, sessTZ)) : true
+rawSessFlag  = rawInSess ? 1 : 0
+
+var int rawInSessCount = 0
+rawInSessCount := rawInSess ? rawInSessCount + 1 : rawInSessCount
+sessionStalled = useSess and bar_index > 50 and rawInSessCount == 0
+
+inSess    = sessionStalled or not useSess ? true : rawInSess
+isNewSess = sessionStalled or not useSess ? (ta.change(dayofmonth) != 0) : (ta.change(rawSessFlag) > 0)
 
 var int sessBar = 0
 sessBar := isNewSess ? 0 : inSess ? sessBar + 1 : sessBar

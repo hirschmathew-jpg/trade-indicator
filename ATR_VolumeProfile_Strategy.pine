@@ -70,7 +70,7 @@ allowLong  = input.bool(true, "Allow Longs",  group = gStrat)
 allowShort = input.bool(true, "Allow Shorts", group = gStrat)
 volConfMul = input.float(1.0, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat, tooltip = "1.0 = disabled. Raise to require volume confirmation on the entry bar.")
 cooldown   = input.int(3,     "Cooldown Bars Between Trades", minval = 0, group = gStrat)
-minVAbars  = input.int(5,     "Min Bars Into Session Before Trading", minval = 1, group = gStrat, tooltip = "Don't trade off a half-formed profile. Wait this many bars after session open.")
+minVAbars  = input.int(3,     "Min Bars Into Session Before Trading", minval = 1, group = gStrat, tooltip = "Don't trade off a half-formed profile. Wait this many bars after session open.")
 
 gMR   = "Mean Reversion"
 mrProxATR  = input.float(0.5, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR, tooltip = "Bar low/high must poke within this ATR-fraction of VAL/VAH.")
@@ -106,14 +106,14 @@ useDailyHalt= input.bool(true,    "Also Halt on Daily Loss", group = gDD)
 maxDaily    = input.float(500.0,  "Max Daily Loss ($)", minval = 50.0, group = gDD, tooltip = "Stops new entries once today's P&L is this far in the red. $400-500 is the target range.")
 
 gSess = "Session"
-useSess    = input.bool(true,  "Restrict to Session (RTH)", group = gSess, tooltip = "Off = trade 24h and reset profile at date change.")
+useSess    = input.bool(false, "Restrict to Session (RTH)", group = gSess, tooltip = "OFF (default) = trade 24h; the profile resets at the chart's day change. Turn ON only if you've confirmed the session string + timezone below matches your symbol exactly - otherwise the strategy can't detect a session and won't trade.")
 sessStr    = input.session("0930-1555", "Session (NY)", group = gSess)
 flatStr    = input.session("1555-1600", "Force-Flat Window", group = gSess)
 sessTZ     = input.string("America/New_York", "Timezone", options = ["America/New_York","America/Chicago","Europe/London","Asia/Tokyo","UTC","Australia/Sydney"], group = gSess)
 
 gAnchor = "Daily Anchor (Guaranteed Trade)"
 forceDaily = input.bool(true, "Force at least one trade per day", group = gAnchor, tooltip = "If no pattern fires by the anchor bar, take a momentum trade so backtest gets at least one trade per session day.")
-anchorBar  = input.int(5,    "Anchor Bar (bars after session open)", minval = 1, maxval = 200, group = gAnchor, tooltip = "Bars elapsed in the session before the anchor fires. Default 5 = 25min on a 5m chart.")
+anchorBar  = input.int(3,    "Anchor Bar (bars after session open)", minval = 1, maxval = 200, group = gAnchor, tooltip = "Bars elapsed in the session before the anchor fires.")
 maxPerDay  = input.int(1,    "Max Trades per Session Day", minval = 1, maxval = 10, group = gAnchor, tooltip = "Cap on entries per day. Default 1 keeps risk bounded.")
 
 gViz  = "Visuals"
@@ -126,10 +126,19 @@ dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
 maxCon = maxConOvr > 0 ? maxConOvr : (autoCap ? (dpp >= 10.0 ? maxConMini : maxConMicro) : maxConMicro)
 
 // ============================== SESSION ======================================
-inSess    = useSess ? not na(time(timeframe.period, sessStr, sessTZ)) : true
-sessFlag  = inSess ? 1 : 0
-isNewSess = useSess ? (ta.change(sessFlag) > 0) : (ta.change(dayofmonth) != 0)
-flatNow   = useSess ? not na(time(timeframe.period, flatStr, sessTZ)) : false
+// If useSess is on but the session string never matches the chart (wrong tz,
+// non-US symbol, etc.), silently fall back to dayofmonth-based detection after
+// 50 bars so the strategy still trades.
+rawInSess    = useSess ? not na(time(timeframe.period, sessStr, sessTZ)) : true
+rawSessFlag  = rawInSess ? 1 : 0
+
+var int rawInSessCount = 0
+rawInSessCount := rawInSess ? rawInSessCount + 1 : rawInSessCount
+sessionStalled = useSess and bar_index > 50 and rawInSessCount == 0
+
+inSess    = sessionStalled or not useSess ? true : rawInSess
+isNewSess = sessionStalled or not useSess ? (ta.change(dayofmonth) != 0) : (ta.change(rawSessFlag) > 0)
+flatNow   = useSess and not sessionStalled ? not na(time(timeframe.period, flatStr, sessTZ)) : false
 
 var int sessBar = 0
 sessBar := isNewSess ? 0 : inSess ? sessBar + 1 : sessBar
@@ -491,7 +500,7 @@ if showBracket and (fireLong or fireShort)
 
 // ============================== STATUS TABLE ================================
 if showStatus and barstate.islast
-    var table t = table.new(position.top_right, 2, 13, border_width = 1, border_color = color.new(color.gray, 60))
+    var table t = table.new(position.top_right, 2, 14, border_width = 1, border_color = color.new(color.gray, 60))
     bL = color.new(color.silver, 30)
     bV = color.new(color.white, 0)
     table.cell(t, 0, 0, "ATR-VP",  bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
@@ -542,6 +551,11 @@ if showStatus and barstate.islast
 
     table.cell(t, 0, 12, "Last blocked by", bgcolor = bL, text_color = color.black, text_size = size.tiny)
     table.cell(t, 1, 12, lastBlock, bgcolor = bV, text_color = lastBlock == "-" ? color.new(color.green, 0) : color.new(color.orange, 0), text_size = size.tiny)
+
+    table.cell(t, 0, 13, "InSess | sessBar", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    sessTxt = (inSess ? "Y" : "N") + " | " + str.tostring(sessBar) + (sessionStalled ? "  (fallback)" : "")
+    sessC   = inSess ? color.new(color.green, 0) : color.new(color.red, 0)
+    table.cell(t, 1, 13, sessTxt, bgcolor = bV, text_color = sessC, text_size = size.tiny)
 
 // ============================== ALERTS ======================================
 alertcondition(fireLong,  "VP Long",  "{{ticker}} ATR-VP LONG @ {{close}}")
