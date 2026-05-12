@@ -34,24 +34,24 @@ atrLen     = input.int(14,    "ATR Length", minval = 2, group = gATR)
 atrSLmult  = input.float(1.5, "Visual Stop = N x ATR", minval = 0.3, step = 0.1, group = gATR)
 useATRReg  = input.bool(true, "ATR Volatility Regime Filter", group = gATR)
 atrAvgLen  = input.int(50,    "Regime Avg Length", minval = 10, group = gATR)
-atrMinMul  = input.float(0.5, "ATR Floor (vs avg)", minval = 0.1, step = 0.05, group = gATR)
-atrMaxMul  = input.float(3.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gATR)
+atrMinMul  = input.float(0.3, "ATR Floor (vs avg)", minval = 0.1, step = 0.05, group = gATR)
+atrMaxMul  = input.float(4.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gATR)
 
 gStrat = "Signals"
 modeStr    = input.string("Both", "Entry Mode", options = ["Mean Reversion","Breakout","Both"], group = gStrat)
 allowLong  = input.bool(true, "Allow BUY Signals",  group = gStrat)
 allowShort = input.bool(true, "Allow SELL Signals", group = gStrat)
-volConfMul = input.float(1.2, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat)
-cooldown   = input.int(5,     "Cooldown Bars Between Signals", minval = 0, group = gStrat)
-minVAbars  = input.int(10,    "Min Bars Into Session Before Signaling", minval = 1, group = gStrat)
+volConfMul = input.float(1.0, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat)
+cooldown   = input.int(3,     "Cooldown Bars Between Signals", minval = 0, group = gStrat)
+minVAbars  = input.int(5,     "Min Bars Into Session Before Signaling", minval = 1, group = gStrat)
 
 gMR   = "Mean Reversion"
-mrProxATR  = input.float(0.3, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR)
-mrWickFrac = input.float(0.4, "Min Rejection Wick (fraction of bar range)", minval = 0.1, step = 0.05, group = gMR)
+mrProxATR  = input.float(0.5, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR)
+mrWickFrac = input.float(0.2, "Min Rejection Wick (fraction of bar range)", minval = 0.0, step = 0.05, group = gMR)
 
 gBO   = "Breakout"
-boBufATR   = input.float(0.1, "Breakout Buffer (ATR fraction)", minval = 0.0, step = 0.05, group = gBO)
-boRngATR   = input.float(0.6, "Min Bar Range (ATR fraction)",   minval = 0.2, step = 0.1,  group = gBO)
+boBufATR   = input.float(0.05, "Breakout Buffer (ATR fraction)", minval = 0.0, step = 0.05, group = gBO)
+boRngATR   = input.float(0.4, "Min Bar Range (ATR fraction)",   minval = 0.1, step = 0.1,  group = gBO)
 
 gTP   = "Bracket Drawing"
 tp1R      = input.float(1.0, "TP1 R-multiple", minval = 0.3, step = 0.1, group = gTP)
@@ -92,7 +92,7 @@ atr     = ta.atr(atrLen)
 atrAvg  = ta.sma(atr, atrAvgLen)
 atrOK   = not useATRReg or (not na(atrAvg) and atr >= atrAvg * atrMinMul and atr <= atrAvg * atrMaxMul)
 avgVol  = ta.sma(volume, 20)
-volOK   = volume >= avgVol * volConfMul
+volOK   = volConfMul <= 1.0 or (not na(avgVol) and volume >= avgVol * volConfMul)
 
 // ============================== DAILY VOLUME PROFILE =========================
 var float[] bins = array.new_float(vpBins, 0.0)

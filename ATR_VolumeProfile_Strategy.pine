@@ -61,24 +61,24 @@ atrLen     = input.int(14,    "ATR Length", minval = 2, group = gATR)
 atrSLmult  = input.float(1.5, "Stop = N x ATR", minval = 0.3, step = 0.1, group = gATR)
 useATRReg  = input.bool(true, "ATR Volatility Regime Filter", group = gATR)
 atrAvgLen  = input.int(50,    "Regime Avg Length", minval = 10, group = gATR)
-atrMinMul  = input.float(0.5, "ATR Floor (vs avg)", minval = 0.1, step = 0.05, group = gATR, tooltip = "Skip trades when current ATR < this x avg ATR. Filters dead chop.")
-atrMaxMul  = input.float(3.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gATR, tooltip = "Skip trades when current ATR > this x avg ATR. Filters news spikes.")
+atrMinMul  = input.float(0.3, "ATR Floor (vs avg)", minval = 0.1, step = 0.05, group = gATR, tooltip = "Skip trades when current ATR < this x avg ATR. Filters dead chop.")
+atrMaxMul  = input.float(4.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gATR, tooltip = "Skip trades when current ATR > this x avg ATR. Filters news spikes.")
 
 gStrat = "Strategy"
 modeStr    = input.string("Both", "Entry Mode", options = ["Mean Reversion","Breakout","Both"], group = gStrat)
 allowLong  = input.bool(true, "Allow Longs",  group = gStrat)
 allowShort = input.bool(true, "Allow Shorts", group = gStrat)
-volConfMul = input.float(1.2, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat, tooltip = "Set to 1.0 to disable.")
-cooldown   = input.int(5,     "Cooldown Bars Between Trades", minval = 0, group = gStrat)
-minVAbars  = input.int(10,    "Min Bars Into Session Before Trading", minval = 1, group = gStrat, tooltip = "Don't trade off a half-formed profile. Wait this many bars after session open.")
+volConfMul = input.float(1.0, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat, tooltip = "1.0 = disabled. Raise to require volume confirmation on the entry bar.")
+cooldown   = input.int(3,     "Cooldown Bars Between Trades", minval = 0, group = gStrat)
+minVAbars  = input.int(5,     "Min Bars Into Session Before Trading", minval = 1, group = gStrat, tooltip = "Don't trade off a half-formed profile. Wait this many bars after session open.")
 
 gMR   = "Mean Reversion"
-mrProxATR  = input.float(0.3, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR, tooltip = "Bar low/high must poke within this ATR-fraction of VAL/VAH.")
-mrWickFrac = input.float(0.4, "Min Rejection Wick (fraction of bar range)", minval = 0.1, step = 0.05, group = gMR)
+mrProxATR  = input.float(0.5, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR, tooltip = "Bar low/high must poke within this ATR-fraction of VAL/VAH.")
+mrWickFrac = input.float(0.2, "Min Rejection Wick (fraction of bar range)", minval = 0.0, step = 0.05, group = gMR)
 
 gBO   = "Breakout"
-boBufATR   = input.float(0.1, "Breakout Buffer (ATR fraction)", minval = 0.0, step = 0.05, group = gBO, tooltip = "Close must clear VAH/VAL by this much ATR before triggering.")
-boRngATR   = input.float(0.6, "Min Bar Range (ATR fraction)",   minval = 0.2, step = 0.1,  group = gBO)
+boBufATR   = input.float(0.05, "Breakout Buffer (ATR fraction)", minval = 0.0, step = 0.05, group = gBO, tooltip = "Close must clear VAH/VAL by this much ATR before triggering.")
+boRngATR   = input.float(0.4, "Min Bar Range (ATR fraction)",   minval = 0.1, step = 0.1,  group = gBO)
 
 gRisk = "Risk / Sizing"
 riskTrade = input.float(200.0, "Risk per Trade ($)", minval = 25.0, group = gRisk, tooltip = "Max $ lost if stop hits at full size. Default $200 leaves room for ~2-3 losers before the daily halt fires.")
@@ -134,7 +134,7 @@ atr     = ta.atr(atrLen)
 atrAvg  = ta.sma(atr, atrAvgLen)
 atrOK   = not useATRReg or (not na(atrAvg) and atr >= atrAvg * atrMinMul and atr <= atrAvg * atrMaxMul)
 avgVol  = ta.sma(volume, 20)
-volOK   = volume >= avgVol * volConfMul
+volOK   = volConfMul <= 1.0 or (not na(avgVol) and volume >= avgVol * volConfMul)
 
 // ============================== DAILY VOLUME PROFILE =========================
 // Bins reset at session start. Each bar in the session adds its volume across
@@ -260,6 +260,19 @@ canTrade = not ddHalt and not dailyHalt and not flatNow
 
 fireLong  = sigLong  and canTrade and canCooldown and strategy.position_size == 0
 fireShort = sigShort and canTrade and canCooldown and strategy.position_size == 0
+
+// Diagnostics: count would-be setups and surface why the latest was blocked.
+anyPattern = mrLong or mrShort or boLong or boShort
+var int setupsTotal = 0
+var int fired       = 0
+var string lastBlock = "-"
+if anyPattern
+    setupsTotal += 1
+    blocked = not (fireLong or fireShort)
+    if blocked
+        lastBlock := not vpReady ? "VP warmup" : not inSess ? "Outside session" : flatNow ? "EOD window" : not atrOK ? "ATR regime" : not volOK ? "Volume conf" : ddHalt ? "DD halt" : dailyHalt ? "Daily halt" : not canCooldown ? "Cooldown" : strategy.position_size != 0 ? "Already in trade" : (not allowLong and (mrLong or boLong)) or (not allowShort and (mrShort or boShort)) ? "Direction toggle" : "-"
+if fireLong or fireShort
+    fired += 1
 
 // ============================== ENTRY / EXIT MGMT ===========================
 var float aE  = na
@@ -451,7 +464,7 @@ if showBracket and (fireLong or fireShort)
 
 // ============================== STATUS TABLE ================================
 if showStatus and barstate.islast
-    var table t = table.new(position.top_right, 2, 11, border_width = 1, border_color = color.new(color.gray, 60))
+    var table t = table.new(position.top_right, 2, 13, border_width = 1, border_color = color.new(color.gray, 60))
     bL = color.new(color.silver, 30)
     bV = color.new(color.white, 0)
     table.cell(t, 0, 0, "ATR-VP",  bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
@@ -494,6 +507,14 @@ if showStatus and barstate.islast
     haltC   = haltStr == "OK" ? color.new(color.green, 0) : color.new(color.red, 0)
     table.cell(t, 0, 10, "State", bgcolor = bL, text_color = color.black, text_size = size.tiny)
     table.cell(t, 1, 10, haltStr, bgcolor = bV, text_color = haltC, text_size = size.tiny)
+
+    table.cell(t, 0, 11, "Setups | Fired", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    setupTxt = str.tostring(setupsTotal) + "  |  " + str.tostring(fired)
+    setupC   = fired > 0 ? color.new(color.green, 0) : setupsTotal > 0 ? color.new(color.orange, 0) : color.new(color.red, 0)
+    table.cell(t, 1, 11, setupTxt, bgcolor = bV, text_color = setupC, text_size = size.tiny)
+
+    table.cell(t, 0, 12, "Last blocked by", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 12, lastBlock, bgcolor = bV, text_color = lastBlock == "-" ? color.new(color.green, 0) : color.new(color.orange, 0), text_size = size.tiny)
 
 // ============================== ALERTS ======================================
 alertcondition(fireLong,  "VP Long",  "{{ticker}} ATR-VP LONG @ {{close}}")
