@@ -71,6 +71,11 @@ useSess    = input.bool(true,  "Restrict to Session (RTH)", group = gSess)
 sessStr    = input.session("0930-1555", "Session (NY)", group = gSess)
 sessTZ     = input.string("America/New_York", "Timezone", options = ["America/New_York","America/Chicago","Europe/London","Asia/Tokyo","UTC","Australia/Sydney"], group = gSess)
 
+gAnchor = "Daily Anchor (Guaranteed Signal)"
+forceDaily = input.bool(true, "Force at least one signal per day", group = gAnchor, tooltip = "If no pattern fires by the anchor bar, show a momentum-based signal.")
+anchorBar  = input.int(5,    "Anchor Bar (bars after session open)", minval = 1, maxval = 200, group = gAnchor)
+maxPerDay  = input.int(1,    "Max Signals per Session Day", minval = 1, maxval = 10, group = gAnchor)
+
 gViz  = "Visuals"
 showSig    = input.bool(true, "Show Entry Labels",  group = gViz)
 showStatus = input.bool(true, "Show Status Table",  group = gViz)
@@ -189,13 +194,28 @@ boShort = useBO and vpReady and close <  val - atr * boBufATR and barRng >= atr 
 sigLong  = (mrLong  or boLong)  and allowLong  and atrOK and inSess and volOK
 sigShort = (mrShort or boShort) and allowShort and atrOK and inSess and volOK
 
+// Daily anchor: ensures at least one signal per session day.
+var float sessOpen    = na
+var int   shownToday  = 0
+if isNewSess
+    sessOpen   := open
+    shownToday := 0
+
+anchorActive = forceDaily and inSess and sessBar >= anchorBar and shownToday == 0
+useVPdir     = vpReady and not na(poc)
+anchorWantsLong = anchorActive and (useVPdir ? close >= poc : close >= nz(sessOpen, close))
+anchorLong   = anchorWantsLong and not sigLong  and not sigShort and allowLong
+anchorShort  = anchorActive and not anchorWantsLong and not sigLong and not sigShort and allowShort
+
 var int lastSigBar = -10000
 canCooldown = bar_index - lastSigBar >= cooldown
+quotaOK = shownToday < maxPerDay
 
-fireLong  = sigLong  and canCooldown
-fireShort = sigShort and canCooldown
+fireLong  = (sigLong  or anchorLong)  and canCooldown and quotaOK
+fireShort = (sigShort or anchorShort) and canCooldown and quotaOK
 if fireLong or fireShort
     lastSigBar := bar_index
+    shownToday += 1
 
 // ============================== VISUALS =====================================
 plot(showLevels and vpReady ? poc : na, "POC", color = pocColor, linewidth = 2, style = plot.style_linebr)
@@ -228,10 +248,12 @@ if showVP and barstate.islast and vpReady
                 array.push(profBoxes, box.new(leftX, yHi, rightX, yLo, border_color = na, bgcolor = vpColor))
 
 // Signal labels
-plotshape(showSig and fireLong  and mrLong,                 "MR Long",  shape.labelup,   location.belowbar, color.new(color.lime,   0), text = "BUY",  textcolor = color.black, size = size.small)
-plotshape(showSig and fireLong  and boLong  and not mrLong,  "BO Long",  shape.labelup,   location.belowbar, color.new(color.green,  0), text = "BUY-BO", textcolor = color.white, size = size.small)
-plotshape(showSig and fireShort and mrShort,                "MR Short", shape.labeldown, location.abovebar, color.new(color.red,    0), text = "SELL", textcolor = color.white, size = size.small)
-plotshape(showSig and fireShort and boShort and not mrShort, "BO Short", shape.labeldown, location.abovebar, color.new(color.maroon, 0), text = "SELL-BO", textcolor = color.white, size = size.small)
+plotshape(showSig and fireLong  and mrLong,                                      "MR Long",      shape.labelup,   location.belowbar, color.new(color.lime,   0), text = "BUY",       textcolor = color.black, size = size.small)
+plotshape(showSig and fireLong  and boLong  and not mrLong,                       "BO Long",      shape.labelup,   location.belowbar, color.new(color.green,  0), text = "BUY-BO",    textcolor = color.white, size = size.small)
+plotshape(showSig and fireLong  and anchorLong  and not mrLong  and not boLong,   "Anchor Long",  shape.labelup,   location.belowbar, color.new(color.blue,   0), text = "BUY-ANCHOR",textcolor = color.white, size = size.small)
+plotshape(showSig and fireShort and mrShort,                                     "MR Short",     shape.labeldown, location.abovebar, color.new(color.red,    0), text = "SELL",      textcolor = color.white, size = size.small)
+plotshape(showSig and fireShort and boShort and not mrShort,                      "BO Short",     shape.labeldown, location.abovebar, color.new(color.maroon, 0), text = "SELL-BO",   textcolor = color.white, size = size.small)
+plotshape(showSig and fireShort and anchorShort and not mrShort and not boShort,  "Anchor Short", shape.labeldown, location.abovebar, color.new(color.navy,   0), text = "SELL-ANCHOR",textcolor = color.white, size = size.small)
 
 bgcolor(useSess and not inSess ? color.new(color.gray, 92) : na, title = "Outside Session")
 

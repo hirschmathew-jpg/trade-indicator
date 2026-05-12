@@ -111,6 +111,11 @@ sessStr    = input.session("0930-1555", "Session (NY)", group = gSess)
 flatStr    = input.session("1555-1600", "Force-Flat Window", group = gSess)
 sessTZ     = input.string("America/New_York", "Timezone", options = ["America/New_York","America/Chicago","Europe/London","Asia/Tokyo","UTC","Australia/Sydney"], group = gSess)
 
+gAnchor = "Daily Anchor (Guaranteed Trade)"
+forceDaily = input.bool(true, "Force at least one trade per day", group = gAnchor, tooltip = "If no pattern fires by the anchor bar, take a momentum trade so backtest gets at least one trade per session day.")
+anchorBar  = input.int(5,    "Anchor Bar (bars after session open)", minval = 1, maxval = 200, group = gAnchor, tooltip = "Bars elapsed in the session before the anchor fires. Default 5 = 25min on a 5m chart.")
+maxPerDay  = input.int(1,    "Max Trades per Session Day", minval = 1, maxval = 10, group = gAnchor, tooltip = "Cap on entries per day. Default 1 keeps risk bounded.")
+
 gViz  = "Visuals"
 showSig    = input.bool(true, "Show Entry Markers", group = gViz)
 showBracket= input.bool(true, "Draw Entry/SL/TP on Live Trade", group = gViz)
@@ -236,6 +241,23 @@ boShort = useBO and vpReady and close <  val - atr * boBufATR and barRng >= atr 
 sigLong  = (mrLong  or boLong)  and allowLong  and atrOK and inSess and not flatNow and volOK
 sigShort = (mrShort or boShort) and allowShort and atrOK and inSess and not flatNow and volOK
 
+// Daily state for anchor entry + per-day trade cap.
+var float sessOpen   = na
+var int   tradesToday = 0
+if isNewSess
+    sessOpen    := open
+    tradesToday := 0
+
+// Anchor entry: triggers at sessBar == anchorBar if no trade has fired today.
+// Direction: above POC -> long, below POC -> short. Falls back to session-open
+// momentum (close >= open of session) when VP isn't ready yet.
+anchorActive = forceDaily and inSess and not flatNow and sessBar >= anchorBar and tradesToday == 0
+useVPdir     = vpReady and not na(poc)
+anchorWantsLong = anchorActive and (useVPdir ? close >= poc : close >= nz(sessOpen, close))
+// Only let anchor fire when no pattern is firing on the same bar (pattern wins).
+anchorLong   = anchorWantsLong and not sigLong  and not sigShort and allowLong
+anchorShort  = anchorActive and not anchorWantsLong and not sigLong and not sigShort and allowShort
+
 var int lastTradeBar = -10000
 canCooldown = bar_index - lastTradeBar >= cooldown
 
@@ -258,11 +280,13 @@ if flatNow and strategy.position_size != 0
 
 canTrade = not ddHalt and not dailyHalt and not flatNow
 
-fireLong  = sigLong  and canTrade and canCooldown and strategy.position_size == 0
-fireShort = sigShort and canTrade and canCooldown and strategy.position_size == 0
+// Pattern OR anchor can fire, gated by the daily cap.
+quotaOK = tradesToday < maxPerDay
+fireLong  = (sigLong  or anchorLong)  and canTrade and canCooldown and quotaOK and strategy.position_size == 0
+fireShort = (sigShort or anchorShort) and canTrade and canCooldown and quotaOK and strategy.position_size == 0
 
 // Diagnostics: count would-be setups and surface why the latest was blocked.
-anyPattern = mrLong or mrShort or boLong or boShort
+anyPattern = mrLong or mrShort or boLong or boShort or anchorLong or anchorShort
 var int setupsTotal = 0
 var int fired       = 0
 var string lastBlock = "-"
@@ -270,9 +294,10 @@ if anyPattern
     setupsTotal += 1
     blocked = not (fireLong or fireShort)
     if blocked
-        lastBlock := not vpReady ? "VP warmup" : not inSess ? "Outside session" : flatNow ? "EOD window" : not atrOK ? "ATR regime" : not volOK ? "Volume conf" : ddHalt ? "DD halt" : dailyHalt ? "Daily halt" : not canCooldown ? "Cooldown" : strategy.position_size != 0 ? "Already in trade" : (not allowLong and (mrLong or boLong)) or (not allowShort and (mrShort or boShort)) ? "Direction toggle" : "-"
+        lastBlock := not vpReady and not anchorActive ? "VP warmup" : not inSess ? "Outside session" : flatNow ? "EOD window" : not atrOK and not anchorActive ? "ATR regime" : not volOK and not anchorActive ? "Volume conf" : ddHalt ? "DD halt" : dailyHalt ? "Daily halt" : not quotaOK ? "Daily quota hit" : not canCooldown ? "Cooldown" : strategy.position_size != 0 ? "Already in trade" : (not allowLong and (mrLong or boLong or anchorLong)) or (not allowShort and (mrShort or boShort or anchorShort)) ? "Direction toggle" : "-"
 if fireLong or fireShort
     fired += 1
+    tradesToday += 1
 
 // ============================== ENTRY / EXIT MGMT ===========================
 var float aE  = na
@@ -425,10 +450,12 @@ if showVP and barstate.islast and vpReady
                 array.push(profBoxes, box.new(leftX, yHi, rightX, yLo, border_color = na, bgcolor = vpColor))
 
 // Entry markers
-plotshape(showSig and fireLong  and mrLong,                "MR Long",  shape.triangleup,   location.belowbar, color.new(color.lime,   0), size = size.small)
-plotshape(showSig and fireLong  and boLong  and not mrLong, "BO Long",  shape.labelup,     location.belowbar, color.new(color.green,  0), text = "BO", textcolor = color.white, size = size.small)
-plotshape(showSig and fireShort and mrShort,               "MR Short", shape.triangledown, location.abovebar, color.new(color.red,    0), size = size.small)
-plotshape(showSig and fireShort and boShort and not mrShort,"BO Short", shape.labeldown,   location.abovebar, color.new(color.maroon, 0), text = "BO", textcolor = color.white, size = size.small)
+plotshape(showSig and fireLong  and mrLong,                       "MR Long",     shape.triangleup,   location.belowbar, color.new(color.lime,   0), size = size.small)
+plotshape(showSig and fireLong  and boLong  and not mrLong,        "BO Long",     shape.labelup,      location.belowbar, color.new(color.green,  0), text = "BO",     textcolor = color.white, size = size.small)
+plotshape(showSig and fireLong  and anchorLong  and not mrLong  and not boLong,  "Anchor Long",  shape.labelup,   location.belowbar, color.new(color.blue,   0), text = "ANCHOR", textcolor = color.white, size = size.small)
+plotshape(showSig and fireShort and mrShort,                      "MR Short",    shape.triangledown, location.abovebar, color.new(color.red,    0), size = size.small)
+plotshape(showSig and fireShort and boShort and not mrShort,       "BO Short",    shape.labeldown,    location.abovebar, color.new(color.maroon, 0), text = "BO",     textcolor = color.white, size = size.small)
+plotshape(showSig and fireShort and anchorShort and not mrShort and not boShort, "Anchor Short", shape.labeldown, location.abovebar, color.new(color.navy,   0), text = "ANCHOR", textcolor = color.white, size = size.small)
 
 bgcolor(useSess and not inSess ? color.new(color.gray, 92) : na, title = "Outside Session")
 bgcolor(ddHalt    ? color.new(color.red,    88) : na, title = "DD Halt")
