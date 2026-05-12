@@ -1,0 +1,500 @@
+//@version=6
+// =============================================================================
+// ATR + Daily Volume Profile Strategy
+// -----------------------------------------------------------------------------
+// Two-tool strategy. No CVD, no orderflow, no VWAP, no EMA bias.
+//
+// Volume Profile:
+//   Developing for the CURRENT TRADING DAY only. Bins reset at session start
+//   (or at the date change if running 24h) and grow as the session unfolds.
+//   POC, VAH, VAL recompute each bar from the bars elapsed today.
+//
+// ATR:
+//   Stop sizing, volatility regime filter, breakout strength gate, runner
+//   trail. ATR length is the only ATR input.
+//
+// Entries (pick one or both):
+//   Mean Reversion - price pokes past VAL (or VAH), bar closes back inside
+//                    value with a rejection wick. Fade toward POC.
+//   Breakout       - bar closes a clear ATR-fraction beyond VAH (or VAL)
+//                    with a wide range. Ride the expansion.
+//
+// Risk:
+//   Sized so loss = $ risk per trade. Auto contract cap: 2 minis (NQ/ES) or
+//   20 micros (MNQ/MES), detected from $/point. Manual override available.
+//
+// Drawdown Protection:
+//   Account-wide trailing drawdown ($2k default). Equity is never allowed to
+//   sit more than this below its all-time peak. Trigger halts new entries
+//   (and optionally closes open).
+// =============================================================================
+
+strategy("ATR + VP Daily", "ATR-VP",
+     overlay              = true,
+     initial_capital      = 50000,
+     default_qty_type     = strategy.fixed,
+     default_qty_value    = 1,
+     pyramiding           = 0,
+     commission_type      = strategy.commission.cash_per_contract,
+     commission_value     = 2.50,
+     slippage             = 2,
+     process_orders_on_close = true,
+     calc_on_every_tick   = false,
+     max_boxes_count      = 500,
+     max_lines_count      = 500,
+     max_labels_count     = 500)
+
+// ============================== INPUTS =======================================
+gVP   = "Volume Profile (Daily)"
+vpBins     = input.int(60,    "Profile Bins",  minval = 10, maxval = 200,  group = gVP, tooltip = "Vertical resolution of the daily profile. More bins = finer detail, smaller value area.")
+vaPct      = input.float(70.0,"Value Area %", minval = 50.0, maxval = 95.0, step = 1.0, group = gVP, tooltip = "Classic Market Profile is 70%.")
+showVP     = input.bool(true, "Draw Today's Profile Histogram", group = gVP)
+showPrev   = input.bool(true, "Show Previous Day POC/VAH/VAL", group = gVP, tooltip = "Yesterday's levels often act as magnets / S&R intraday.")
+showLevels = input.bool(true, "Show Today's POC / VAH / VAL Lines", group = gVP)
+vpColor    = input.color(color.new(color.teal, 75),  "Profile Bin Color", group = gVP)
+pocColor   = input.color(color.yellow,                "POC Color",        group = gVP)
+vaColor    = input.color(color.new(color.aqua, 0),    "VAH/VAL Color",    group = gVP)
+prevColor  = input.color(color.new(color.silver, 40), "Prev-Day Color",   group = gVP)
+
+gATR  = "ATR"
+atrLen     = input.int(14,    "ATR Length", minval = 2, group = gATR)
+atrSLmult  = input.float(1.5, "Stop = N x ATR", minval = 0.3, step = 0.1, group = gATR)
+useATRReg  = input.bool(true, "ATR Volatility Regime Filter", group = gATR)
+atrAvgLen  = input.int(50,    "Regime Avg Length", minval = 10, group = gATR)
+atrMinMul  = input.float(0.5, "ATR Floor (vs avg)", minval = 0.1, step = 0.05, group = gATR, tooltip = "Skip trades when current ATR < this x avg ATR. Filters dead chop.")
+atrMaxMul  = input.float(3.0, "ATR Ceiling (vs avg)", minval = 1.0, step = 0.1, group = gATR, tooltip = "Skip trades when current ATR > this x avg ATR. Filters news spikes.")
+
+gStrat = "Strategy"
+modeStr    = input.string("Both", "Entry Mode", options = ["Mean Reversion","Breakout","Both"], group = gStrat)
+allowLong  = input.bool(true, "Allow Longs",  group = gStrat)
+allowShort = input.bool(true, "Allow Shorts", group = gStrat)
+volConfMul = input.float(1.2, "Entry Vol Multiplier (vs 20-bar avg)", minval = 1.0, step = 0.1, group = gStrat, tooltip = "Set to 1.0 to disable.")
+cooldown   = input.int(5,     "Cooldown Bars Between Trades", minval = 0, group = gStrat)
+minVAbars  = input.int(10,    "Min Bars Into Session Before Trading", minval = 1, group = gStrat, tooltip = "Don't trade off a half-formed profile. Wait this many bars after session open.")
+
+gMR   = "Mean Reversion"
+mrProxATR  = input.float(0.3, "VA Proximity (ATR fraction)", minval = 0.05, step = 0.05, group = gMR, tooltip = "Bar low/high must poke within this ATR-fraction of VAL/VAH.")
+mrWickFrac = input.float(0.4, "Min Rejection Wick (fraction of bar range)", minval = 0.1, step = 0.05, group = gMR)
+
+gBO   = "Breakout"
+boBufATR   = input.float(0.1, "Breakout Buffer (ATR fraction)", minval = 0.0, step = 0.05, group = gBO, tooltip = "Close must clear VAH/VAL by this much ATR before triggering.")
+boRngATR   = input.float(0.6, "Min Bar Range (ATR fraction)",   minval = 0.2, step = 0.1,  group = gBO)
+
+gRisk = "Risk / Sizing"
+riskTrade = input.float(200.0, "Risk per Trade ($)", minval = 25.0, group = gRisk, tooltip = "Max $ lost if stop hits at full size. Default $200 leaves room for ~2-3 losers before the daily halt fires.")
+autoCap   = input.bool(true,   "Auto Contract Cap (2 minis / 20 micros)", group = gRisk, tooltip = "Detects from $/point. Mini (NQ/ES, $/pt >= 10) caps at 2. Micro (MNQ/MES) caps at 20.")
+maxConMini  = input.int(2,     "Max Contracts (Minis)",  minval = 1, maxval = 20, group = gRisk)
+maxConMicro = input.int(20,    "Max Contracts (Micros)", minval = 1, maxval = 100, group = gRisk)
+maxConOvr   = input.int(0,     "Manual Cap Override (0 = use auto)", minval = 0, maxval = 100, group = gRisk)
+ovrPV       = input.float(0.0, "Override $/Point (0 = auto)", minval = 0.0, group = gRisk)
+
+gTP   = "Targets / Trail"
+tp1R      = input.float(1.0, "TP1 R-multiple", minval = 0.3, step = 0.1, group = gTP)
+tp2R      = input.float(2.0, "TP2 R-multiple", minval = 0.5, step = 0.1, group = gTP)
+tp3R      = input.float(3.0, "TP3 R-multiple", minval = 1.0, step = 0.1, group = gTP)
+tp1Frac   = input.float(0.34, "TP1 Close Fraction", minval = 0.1, maxval = 0.9, step = 0.01, group = gTP)
+tp2Frac   = input.float(0.33, "TP2 Close Fraction", minval = 0.1, maxval = 0.9, step = 0.01, group = gTP)
+usePOCtgt = input.bool(true,  "Use POC as TP1 (mean reversion only)", group = gTP, tooltip = "When a mean-reversion trade is taken, override TP1 to the POC distance. Falls back to TP1 R if POC is closer than 0.3R.")
+beAfter1  = input.bool(true,  "Move SL to Break-Even after TP1", group = gTP)
+useTrail  = input.bool(true,  "Trail Runner after TP2", group = gTP)
+trailMul  = input.float(2.0,  "Trail ATR Multiple", minval = 0.5, step = 0.1, group = gTP)
+
+gDD   = "Drawdown Protection"
+maxDD       = input.float(2000.0, "Max Account Drawdown ($)", minval = 100.0, group = gDD, tooltip = "Equity is never allowed to sit more than this below its all-time peak. Halts new entries when breached.")
+ddCloseOpen = input.bool(false,   "Close Open Position on DD Halt", group = gDD, tooltip = "When ON, force-flat on DD breach. When OFF, just blocks new entries and lets the open trade hit its natural stop.")
+useDailyHalt= input.bool(true,    "Also Halt on Daily Loss", group = gDD)
+maxDaily    = input.float(500.0,  "Max Daily Loss ($)", minval = 50.0, group = gDD, tooltip = "Stops new entries once today's P&L is this far in the red. $400-500 is the target range.")
+
+gSess = "Session"
+useSess    = input.bool(true,  "Restrict to Session (RTH)", group = gSess, tooltip = "Off = trade 24h and reset profile at date change.")
+sessStr    = input.session("0930-1555", "Session (NY)", group = gSess)
+flatStr    = input.session("1555-1600", "Force-Flat Window", group = gSess)
+sessTZ     = input.string("America/New_York", "Timezone", options = ["America/New_York","America/Chicago","Europe/London","Asia/Tokyo","UTC","Australia/Sydney"], group = gSess)
+
+gViz  = "Visuals"
+showSig    = input.bool(true, "Show Entry Markers", group = gViz)
+showBracket= input.bool(true, "Draw Entry/SL/TP on Live Trade", group = gViz)
+showStatus = input.bool(true, "Show Status Table", group = gViz)
+
+// ============================== POINT VALUE ==================================
+dpp = ovrPV > 0 ? ovrPV : (syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0)
+maxCon = maxConOvr > 0 ? maxConOvr : (autoCap ? (dpp >= 10.0 ? maxConMini : maxConMicro) : maxConMicro)
+
+// ============================== SESSION ======================================
+inSess    = useSess ? not na(time(timeframe.period, sessStr, sessTZ)) : true
+sessFlag  = inSess ? 1 : 0
+isNewSess = useSess ? (ta.change(sessFlag) > 0) : (ta.change(dayofmonth) != 0)
+flatNow   = useSess ? not na(time(timeframe.period, flatStr, sessTZ)) : false
+
+var int sessBar = 0
+sessBar := isNewSess ? 0 : inSess ? sessBar + 1 : sessBar
+
+// ============================== ATR + REGIME =================================
+atr     = ta.atr(atrLen)
+atrAvg  = ta.sma(atr, atrAvgLen)
+atrOK   = not useATRReg or (not na(atrAvg) and atr >= atrAvg * atrMinMul and atr <= atrAvg * atrMaxMul)
+avgVol  = ta.sma(volume, 20)
+volOK   = volume >= avgVol * volConfMul
+
+// ============================== DAILY VOLUME PROFILE =========================
+// Bins reset at session start. Each bar in the session adds its volume across
+// the bins its high-low range touches. POC / VAH / VAL recompute every bar.
+
+var float[] bins = array.new_float(vpBins, 0.0)
+
+var float sessHi = na
+var float sessLo = na
+if isNewSess
+    sessHi := high
+    sessLo := low
+else if inSess
+    sessHi := math.max(nz(sessHi, high), high)
+    sessLo := math.min(nz(sessLo, low),  low)
+
+float poc = na
+float vah = na
+float val = na
+float binSize = na
+
+if inSess and not na(sessHi) and not na(sessLo) and sessHi > sessLo and sessBar >= 1
+    binSize := (sessHi - sessLo) / vpBins
+    array.fill(bins, 0.0)
+    iters = math.min(sessBar, 1500)
+    for i = 0 to iters
+        bh = high[i]
+        bl = low[i]
+        bv = volume[i]
+        if not na(bh) and not na(bl) and not na(bv) and bv > 0 and bh >= bl
+            fb = math.max(0, math.floor((bl - sessLo) / binSize))
+            lb = math.min(vpBins - 1, math.floor((bh - sessLo) / binSize))
+            cnt = lb - fb + 1
+            if cnt > 0
+                pv = bv / cnt
+                for b = fb to lb
+                    array.set(bins, b, array.get(bins, b) + pv)
+
+    pocIdx = 0
+    pocVol = 0.0
+    for i = 0 to vpBins - 1
+        v = array.get(bins, i)
+        if v > pocVol
+            pocVol := v
+            pocIdx := i
+
+    totalVol = 0.0
+    for i = 0 to vpBins - 1
+        totalVol += array.get(bins, i)
+    target = totalVol * vaPct / 100.0
+
+    int vu = pocIdx
+    int vd = pocIdx
+    float cur = pocVol
+    while cur < target and (vu < vpBins - 1 or vd > 0)
+        upV = vu < vpBins - 1 ? array.get(bins, vu + 1) : -1.0
+        dnV = vd > 0 ? array.get(bins, vd - 1) : -1.0
+        if upV < 0 and dnV < 0
+            break
+        if upV >= dnV
+            vu += 1
+            cur += upV
+        else
+            vd -= 1
+            cur += dnV
+
+    poc := sessLo + (pocIdx + 0.5) * binSize
+    vah := sessLo + (vu + 1) * binSize
+    val := sessLo + vd * binSize
+
+vpReady = not na(poc) and not na(vah) and not na(val) and sessBar >= minVAbars
+
+// Previous-day levels: capture today's POC/VAH/VAL at the bar BEFORE session end
+// so they're available next session.
+var float prevPoc = na
+var float prevVah = na
+var float prevVal = na
+if isNewSess and not na(poc[1])
+    prevPoc := poc[1]
+    prevVah := vah[1]
+    prevVal := val[1]
+
+// ============================== ENTRY SIGNALS ===============================
+useMR = modeStr == "Mean Reversion" or modeStr == "Both"
+useBO = modeStr == "Breakout"      or modeStr == "Both"
+
+barRng = high - low
+upWick = high - math.max(open, close)
+dnWick = math.min(open, close) - low
+upWickFrac = barRng > 0 ? upWick / barRng : 0.0
+dnWickFrac = barRng > 0 ? dnWick / barRng : 0.0
+
+mrLong  = useMR and vpReady and low  <= val + atr * mrProxATR and close >  val and close >  open and dnWickFrac >= mrWickFrac
+mrShort = useMR and vpReady and high >= vah - atr * mrProxATR and close <  vah and close <  open and upWickFrac >= mrWickFrac
+
+boLong  = useBO and vpReady and close >  vah + atr * boBufATR and barRng >= atr * boRngATR and close >  open
+boShort = useBO and vpReady and close <  val - atr * boBufATR and barRng >= atr * boRngATR and close <  open
+
+sigLong  = (mrLong  or boLong)  and allowLong  and atrOK and inSess and not flatNow and volOK
+sigShort = (mrShort or boShort) and allowShort and atrOK and inSess and not flatNow and volOK
+
+var int lastTradeBar = -10000
+canCooldown = bar_index - lastTradeBar >= cooldown
+
+// ============================== DD PROTECTION ===============================
+var float peakEq = strategy.initial_capital
+peakEq := math.max(peakEq, strategy.equity)
+ddFromPeak = peakEq - strategy.equity
+ddHalt = ddFromPeak >= maxDD
+
+var float dayStartEq = strategy.initial_capital
+if isNewSess
+    dayStartEq := strategy.equity
+dayPnL = strategy.equity - dayStartEq
+dailyHalt = useDailyHalt and dayPnL <= -maxDaily
+
+if ddHalt and ddCloseOpen and strategy.position_size != 0
+    strategy.close_all(comment = "DD halt")
+if flatNow and strategy.position_size != 0
+    strategy.close_all(comment = "EOD flat")
+
+canTrade = not ddHalt and not dailyHalt and not flatNow
+
+fireLong  = sigLong  and canTrade and canCooldown and strategy.position_size == 0
+fireShort = sigShort and canTrade and canCooldown and strategy.position_size == 0
+
+// ============================== ENTRY / EXIT MGMT ===========================
+var float aE  = na
+var float aS  = na
+var float aT1 = na
+var float aT2 = na
+var float aT3 = na
+var int   aQ1 = 0
+var int   aQ2 = 0
+var int   aDir = 0
+var bool  aTp1 = false
+var bool  aTp2 = false
+var float aTrail = na
+
+if strategy.position_size == 0
+    aDir := 0
+    aTp1 := false
+    aTp2 := false
+    aTrail := na
+
+f_size(riskPts) =>
+    rPC = riskPts * dpp
+    rPC > 0 ? math.max(1, math.min(maxCon, math.floor(riskTrade / rPC))) : 1
+
+if fireLong
+    e  = close
+    rd = atr * atrSLmult
+    sl = e - rd
+    qty = f_size(rd)
+    q1 = math.max(1, math.floor(qty * tp1Frac))
+    q2 = math.max(1, math.floor(qty * tp2Frac))
+    t1 = e + rd * tp1R
+    // For mean reversion, optionally target POC if it's a sensible distance
+    if usePOCtgt and mrLong and not na(poc)
+        pocDist = poc - e
+        if pocDist >= rd * 0.3
+            t1 := poc
+    t2 = e + rd * tp2R
+    t3 = e + rd * tp3R
+    aE   := e
+    aS   := sl
+    aT1  := t1
+    aT2  := t2
+    aT3  := t3
+    aQ1  := q1
+    aQ2  := q2
+    aDir := 1
+    aTp1 := false
+    aTp2 := false
+    aTrail := na
+    lastTradeBar := bar_index
+    strategy.entry("L", strategy.long, qty = qty)
+    strategy.exit("L-TP1", from_entry = "L", qty = q1, limit = t1, stop = sl)
+    strategy.exit("L-TP2", from_entry = "L", qty = q2, limit = t2, stop = sl)
+    strategy.exit("L-TP3", from_entry = "L",            limit = t3, stop = sl)
+
+if fireShort
+    e  = close
+    rd = atr * atrSLmult
+    sl = e + rd
+    qty = f_size(rd)
+    q1 = math.max(1, math.floor(qty * tp1Frac))
+    q2 = math.max(1, math.floor(qty * tp2Frac))
+    t1 = e - rd * tp1R
+    if usePOCtgt and mrShort and not na(poc)
+        pocDist = e - poc
+        if pocDist >= rd * 0.3
+            t1 := poc
+    t2 = e - rd * tp2R
+    t3 = e - rd * tp3R
+    aE   := e
+    aS   := sl
+    aT1  := t1
+    aT2  := t2
+    aT3  := t3
+    aQ1  := q1
+    aQ2  := q2
+    aDir := -1
+    aTp1 := false
+    aTp2 := false
+    aTrail := na
+    lastTradeBar := bar_index
+    strategy.entry("S", strategy.short, qty = qty)
+    strategy.exit("S-TP1", from_entry = "S", qty = q1, limit = t1, stop = sl)
+    strategy.exit("S-TP2", from_entry = "S", qty = q2, limit = t2, stop = sl)
+    strategy.exit("S-TP3", from_entry = "S",            limit = t3, stop = sl)
+
+// ============================== TP DETECTION + DYNAMIC STOP =================
+if aDir ==  1 and not aTp1 and not na(aT1) and high >= aT1
+    aTp1 := true
+if aDir == -1 and not aTp1 and not na(aT1) and low  <= aT1
+    aTp1 := true
+if aDir ==  1 and not aTp2 and not na(aT2) and high >= aT2
+    aTp2 := true
+if aDir == -1 and not aTp2 and not na(aT2) and low  <= aT2
+    aTp2 := true
+
+if useTrail and aTp2 and aDir == 1
+    raw = close - atr * trailMul
+    floor = beAfter1 ? math.max(raw, aE) : raw
+    aTrail := math.max(nz(aTrail, floor), floor)
+if useTrail and aTp2 and aDir == -1
+    raw = close + atr * trailMul
+    floor = beAfter1 ? math.min(raw, aE) : raw
+    aTrail := math.min(nz(aTrail, floor), floor)
+
+dynStop2 = beAfter1 and aTp1 ? aE : aS
+dynStop3 = useTrail and aTp2 and not na(aTrail) ? aTrail : (beAfter1 and aTp1 ? aE : aS)
+
+if aDir ==  1 and strategy.position_size > 0 and bar_index > lastTradeBar
+    strategy.exit("L-TP1", from_entry = "L", qty = aQ1, limit = aT1, stop = aS)
+    strategy.exit("L-TP2", from_entry = "L", qty = aQ2, limit = aT2, stop = dynStop2)
+    strategy.exit("L-TP3", from_entry = "L",            limit = aT3, stop = dynStop3)
+if aDir == -1 and strategy.position_size < 0 and bar_index > lastTradeBar
+    strategy.exit("S-TP1", from_entry = "S", qty = aQ1, limit = aT1, stop = aS)
+    strategy.exit("S-TP2", from_entry = "S", qty = aQ2, limit = aT2, stop = dynStop2)
+    strategy.exit("S-TP3", from_entry = "S",            limit = aT3, stop = dynStop3)
+
+// ============================== VISUALS =====================================
+// Plot today's POC/VAH/VAL as live lines.
+plot(showLevels and vpReady ? poc : na, "POC", color = pocColor, linewidth = 2, style = plot.style_linebr)
+plot(showLevels and vpReady ? vah : na, "VAH", color = vaColor,  linewidth = 1, style = plot.style_linebr)
+plot(showLevels and vpReady ? val : na, "VAL", color = vaColor,  linewidth = 1, style = plot.style_linebr)
+
+plot(showPrev and not na(prevPoc) ? prevPoc : na, "Prev POC", color = prevColor, linewidth = 1, style = plot.style_circles)
+plot(showPrev and not na(prevVah) ? prevVah : na, "Prev VAH", color = prevColor, linewidth = 1, style = plot.style_circles)
+plot(showPrev and not na(prevVal) ? prevVal : na, "Prev VAL", color = prevColor, linewidth = 1, style = plot.style_circles)
+
+// Profile histogram boxes anchored to right edge of chart.
+var box[] profBoxes = array.new<box>()
+if showVP and barstate.islast and vpReady
+    for i = 0 to array.size(profBoxes) - 1
+        box.delete(array.get(profBoxes, i))
+    array.clear(profBoxes)
+    maxV = 0.0
+    for i = 0 to vpBins - 1
+        v = array.get(bins, i)
+        if v > maxV
+            maxV := v
+    if maxV > 0 and not na(binSize)
+        maxWidth = math.max(5, math.min(60, sessBar / 2))
+        rightX = bar_index
+        for i = 0 to vpBins - 1
+            v = array.get(bins, i)
+            if v > 0
+                w = math.max(1, math.round(v / maxV * maxWidth))
+                yLo = sessLo + i * binSize
+                yHi = yLo + binSize
+                leftX = rightX - w
+                array.push(profBoxes, box.new(leftX, yHi, rightX, yLo, border_color = na, bgcolor = vpColor))
+
+// Entry markers
+plotshape(showSig and fireLong  and mrLong,                "MR Long",  shape.triangleup,   location.belowbar, color.new(color.lime,   0), size = size.small)
+plotshape(showSig and fireLong  and boLong  and not mrLong, "BO Long",  shape.labelup,     location.belowbar, color.new(color.green,  0), text = "BO", textcolor = color.white, size = size.small)
+plotshape(showSig and fireShort and mrShort,               "MR Short", shape.triangledown, location.abovebar, color.new(color.red,    0), size = size.small)
+plotshape(showSig and fireShort and boShort and not mrShort,"BO Short", shape.labeldown,   location.abovebar, color.new(color.maroon, 0), text = "BO", textcolor = color.white, size = size.small)
+
+bgcolor(useSess and not inSess ? color.new(color.gray, 92) : na, title = "Outside Session")
+bgcolor(ddHalt    ? color.new(color.red,    88) : na, title = "DD Halt")
+bgcolor(dailyHalt ? color.new(color.orange, 88) : na, title = "Daily Loss Halt")
+
+// Live trade bracket (entry/SL/TP lines on a fresh signal).
+var line  lnE  = na
+var line  lnS  = na
+var line  lnT1 = na
+var line  lnT2 = na
+var line  lnT3 = na
+f_clear_bracket() =>
+    if not na(lnE)
+        line.delete(lnE)
+    if not na(lnS)
+        line.delete(lnS)
+    if not na(lnT1)
+        line.delete(lnT1)
+    if not na(lnT2)
+        line.delete(lnT2)
+    if not na(lnT3)
+        line.delete(lnT3)
+
+if showBracket and (fireLong or fireShort)
+    f_clear_bracket()
+    rx = bar_index + 30
+    cE = fireLong ? color.new(color.green, 0) : color.new(color.red, 0)
+    lnE  := line.new(bar_index, aE,  rx, aE,  color = cE, width = 2)
+    lnS  := line.new(bar_index, aS,  rx, aS,  color = color.new(color.red,  0), width = 1, style = line.style_dashed)
+    lnT1 := line.new(bar_index, aT1, rx, aT1, color = color.new(color.lime, 0), width = 1, style = line.style_dotted)
+    lnT2 := line.new(bar_index, aT2, rx, aT2, color = color.new(color.lime, 0), width = 1, style = line.style_dotted)
+    lnT3 := line.new(bar_index, aT3, rx, aT3, color = color.new(color.lime, 0), width = 2, style = line.style_dotted)
+
+// ============================== STATUS TABLE ================================
+if showStatus and barstate.islast
+    var table t = table.new(position.top_right, 2, 11, border_width = 1, border_color = color.new(color.gray, 60))
+    bL = color.new(color.silver, 30)
+    bV = color.new(color.white, 0)
+    table.cell(t, 0, 0, "ATR-VP",  bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 0, syminfo.ticker, bgcolor = color.new(color.black, 0), text_color = color.white, text_size = size.small)
+
+    table.cell(t, 0, 1, "$/pt | Cap", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 1, "$" + str.tostring(dpp, "#.##") + " | " + str.tostring(maxCon) + " ct", bgcolor = bV, text_color = color.black, text_size = size.tiny)
+
+    table.cell(t, 0, 2, "ATR", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    atrTxt = str.tostring(atr, format.mintick) + (atrOK ? "  ok" : "  filtered")
+    atrC   = atrOK ? color.new(color.green, 0) : color.new(color.red, 0)
+    table.cell(t, 1, 2, atrTxt, bgcolor = bV, text_color = atrC, text_size = size.tiny)
+
+    table.cell(t, 0, 3, "POC", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 3, vpReady ? str.tostring(poc, format.mintick) : "-", bgcolor = bV, text_color = color.black, text_size = size.tiny)
+
+    table.cell(t, 0, 4, "VAH / VAL", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 4, vpReady ? str.tostring(vah, format.mintick) + " / " + str.tostring(val, format.mintick) : "-", bgcolor = bV, text_color = color.black, text_size = size.tiny)
+
+    table.cell(t, 0, 5, "Mode", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 5, modeStr, bgcolor = bV, text_color = color.black, text_size = size.tiny)
+
+    table.cell(t, 0, 6, "Position", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    posTxt = strategy.position_size > 0 ? "LONG " + str.tostring(strategy.position_size) : strategy.position_size < 0 ? "SHORT " + str.tostring(math.abs(strategy.position_size)) : "FLAT"
+    posC   = strategy.position_size > 0 ? color.new(color.green, 0) : strategy.position_size < 0 ? color.new(color.red, 0) : color.black
+    table.cell(t, 1, 6, posTxt, bgcolor = bV, text_color = posC, text_size = size.tiny)
+
+    table.cell(t, 0, 7, "Equity / Peak", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 7, "$" + str.tostring(strategy.equity, "#") + " / $" + str.tostring(peakEq, "#"), bgcolor = bV, text_color = color.black, text_size = size.tiny)
+
+    table.cell(t, 0, 8, "DD from Peak", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    ddC = ddHalt ? color.new(color.red, 0) : ddFromPeak > maxDD * 0.5 ? color.new(color.orange, 0) : color.new(color.green, 0)
+    table.cell(t, 1, 8, "-$" + str.tostring(ddFromPeak, "#.##") + " / -$" + str.tostring(maxDD, "#"), bgcolor = bV, text_color = ddC, text_size = size.tiny)
+
+    table.cell(t, 0, 9, "Day P&L", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    pnlC = dayPnL >= 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+    table.cell(t, 1, 9, "$" + str.tostring(dayPnL, "#.##"), bgcolor = bV, text_color = pnlC, text_size = size.tiny)
+
+    haltStr = ddHalt ? "DD HALT" : dailyHalt ? "DAILY HALT" : flatNow ? "EOD WINDOW" : not canCooldown ? "COOLDOWN" : not atrOK ? "ATR FILTER" : "OK"
+    haltC   = haltStr == "OK" ? color.new(color.green, 0) : color.new(color.red, 0)
+    table.cell(t, 0, 10, "State", bgcolor = bL, text_color = color.black, text_size = size.tiny)
+    table.cell(t, 1, 10, haltStr, bgcolor = bV, text_color = haltC, text_size = size.tiny)
+
+// ============================== ALERTS ======================================
+alertcondition(fireLong,  "VP Long",  "{{ticker}} ATR-VP LONG @ {{close}}")
+alertcondition(fireShort, "VP Short", "{{ticker}} ATR-VP SHORT @ {{close}}")
